@@ -100,7 +100,7 @@ The script inspects `/sys/class/dmi/id/sys_vendor` and automatically selects the
 Clone the repository and run the installer as `root`:
 
 ```bash
-git clone https://github.com/SEU_USUARIO/gerenciador-bateria.git
+git clone https://github.com/AlanSchaffer/gerenciador-bateria.git
 cd gerenciador-bateria
 chmod +x gerenciador-bateria.sh
 sudo ./gerenciador-bateria.sh install
@@ -221,7 +221,7 @@ O script lê `/sys/class/dmi/id/sys_vendor` e seleciona automaticamente o melhor
 Clone o repositório e execute o instalador com `sudo`:
 
 ```bash
-git clone https://github.com/SEU_USUARIO/gerenciador-bateria.git
+git clone https://github.com/AlanSchaffer/gerenciador-bateria.git
 cd gerenciador-bateria
 chmod +x gerenciador-bateria.sh
 sudo ./gerenciador-bateria.sh install
@@ -266,7 +266,7 @@ sudo ./gerenciador-bateria.sh install
 
 ## 📄 Why this?
 
- ###Criei este projeto justamente para resolver o problema de quem usa Linux no laptop. Minha ideia foi criar, com a ajuda de inteligências artificiais, um projeto que ajudasse a preservar a vida útil da bateria. Acredito que existam outras pessoas enfrentando essa mesma dificuldade e espero poder ajudar. Todos os projetos aqui são open source; sinta-se à vontade para modificar o código como desejar, criar versões melhores, enfim. Também quero deixar meus créditos ao Gemini pela ajuda.
+ Criei este projeto justamente para resolver o problema de quem usa Linux no laptop. Minha ideia foi criar, com a ajuda de inteligências artificiais, um projeto que ajudasse a preservar a vida útil da bateria. Acredito que existam outras pessoas enfrentando essa mesma dificuldade e espero poder ajudar. Todos os projetos aqui são open source; sinta-se à vontade para modificar o código como desejar, criar versões melhores, enfim. Também quero deixar meus créditos ao Gemini pela ajuda.
 
- ###I created this project specifically to solve a common issue for Linux laptop users. My idea was to build a project, with the assistance of artificial intelligence, to help preserve laptop battery life. I believe others might be facing this same issue, and I hope this helps you out. All projects here are open-source, so feel free to modify the code however you like, build better versions, or adapt it. I’d also like to give credit to Gemini for the assistance.
+ I created this project specifically to solve a common issue for Linux laptop users. My idea was to build a project, with the assistance of artificial intelligence, to help preserve laptop battery life. I believe others might be facing this same issue, and I hope this helps you out. All projects here are open-source, so feel free to modify the code however you like, build better versions, or adapt it. I’d also like to give credit to Gemini for the assistance.
 
