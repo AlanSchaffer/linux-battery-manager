@@ -1,4 +1,7 @@
 
+## !! > This program is currently under development. New features are actively being added, including a language switcher and extra functionalities, alongside ongoing bug fixes.
+
+
 # 🔋 Universal Linux Battery Manager (`gerenciador-bateria`)
 
 **Intelligent Charge Threshold & AC Auto-Discharge Manager for Linux Laptops**  
