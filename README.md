@@ -1,8 +1,7 @@
+> [!NOTE]
+> This program is currently under development. New features are actively being added, including a language switcher and extra functionalities, alongside ongoing bug fixes.
 
-## !! > This program is currently under development. New features are actively being added, including a language switcher and extra functionalities, alongside ongoing bug fixes.
-
-
-# 🔋 Universal Linux Battery Manager (`gerenciador-bateria`)
+# 🔋 Universal Linux Battery Manager (`linux-battery-manager`)
 
 **Intelligent Charge Threshold & AC Auto-Discharge Manager for Linux Laptops**  
 *Gerenciador Inteligente de Limites de Carga e Descarga Automática na Tomada para Notebooks Linux*
@@ -12,23 +11,22 @@
 🌐 **Select Language / Escolha o Idioma:**  
 [🇺🇸 **English Documentation**](#-english-documentation) &nbsp;|&nbsp; [🇧🇷 **Documentação em Português**](#-documentação-em-português)
 
-</div>
-
 ---
 
 # 🇺🇸 English Documentation
 
 ## 📖 Overview
 
-**Universal Linux Battery Manager (`gerenciador-bateria`)** is a lightweight, zero-dependency, standalone Bash utility and `systemd` daemon designed to extend the lifespan of lithium-ion laptop batteries on Linux (**Arch Linux, Ubuntu, Debian, Fedora, openSUSE**, etc.).
+**Universal Linux Battery Manager (`linux-battery-manager`)** is a lightweight, zero-dependency, standalone Bash utility and `systemd` daemon designed to extend the lifespan of lithium-ion laptop batteries on Linux (**Arch Linux, Ubuntu, Debian, Fedora, openSUSE**, etc.).
 
-Unlike standard battery threshold scripts that merely set static `/sys/class/power_supply` limits, this project introduces **Smart AC Auto-Discharge** and a **Zero-Latency Native Terminal UI (TUI)** built directly on `/dev/tty`.
+Unlike standard battery threshold scripts that merely set static `/sys/class/power_supply` limits, this project introduces **Smart AC Auto-Discharge** and a **Centered, Zero-Latency Native Terminal UI (TUI)** built directly on `/dev/tty` without emojis to prevent cross-platform rendering issues.
 
 ### ✨ Key Features
 
 - 🤖 **100% Automatic Hardware Detection**: Natively supports **Lenovo (ThinkPad / IdeaPad)**, **ASUS (ROG / ZenBook / TUF / VivoBook)**, **Dell / Alienware**, and generic Linux `sysfs` interfaces.
 - ⚡ **Smart AC Auto-Discharge (`force-discharge`)**: Solves the "100% Stagnation Problem" when your laptop is charged while powered off.
-- 🖥️ **Zero-Latency Native TUI**: Built in pure Bash with ANSI escape sequences reading directly from `/dev/tty`—supports Arrow keys (`↑`/`↓`), Vim keys (`j`/`k`), numeric shortcuts (`0-5`), and **instant single-press `ESC` exit** with zero external dependencies (`whiptail`/`dialog` not required!).
+- 🖥️ **Zero-Latency Centered TUI**: Built in pure Bash with ANSI escape sequences reading directly from `/dev/tty`—supports Arrow keys (`↑`/`↓`), Vim keys (`j`/`k`), numeric shortcuts (`0-6`), and **instant single-press `ESC` exit** with zero external dependencies (`whiptail`/`dialog` not required!).
+- 🌐 **Built-in Language Switcher**: Toggle instantly between English and Portuguese directly from the TUI or CLI (`lang en` / `lang pt`).
 - 🛡️ **Sleep / Hibernation Persistence**: Automatically re-applies charge limits if the BIOS/EC resets them after suspend or hibernation.
 - 🔒 **Hardened `systemd` Daemon**: Runs in the background with virtually **0% CPU usage**, strict filesystem protections, and safety cutoffs.
 
@@ -39,7 +37,7 @@ Unlike standard battery threshold scripts that merely set static `/sys/class/pow
 ### The "100% Stagnation" Problem
 When you plug in your laptop while it is turned **off**, the motherboard's Embedded Controller (EC) often ignores OS-level limits and charges the battery to **100%**. With ordinary threshold tools, when you boot into Linux with the AC adapter plugged in, the laptop switches to *AC Bypass* mode—leaving your battery **trapped at 100% charge under high voltage and thermal stress** for days or weeks.
 
-### How `gerenciador-bateria` Solves It
+### How `linux-battery-manager` Solves It
 ```text
 [Boot on AC at 100%] ──► Daemon detects Capacity (100%) > End Threshold (80%)
                      ──► Activates kernel 'force-discharge' while plugged in
@@ -55,30 +53,31 @@ When you plug in your laptop while it is turned **off**, the motherboard's Embed
 
 ## 🖥️ Interactive Terminal UI (TUI)
 
-Run `sudo gerenciador-bateria` (or `sudo gerenciador_bateria`) with no arguments to launch the interactive panel:
+Run `sudo linux-battery-manager` (or `sudo linux_battery_manager`) with no arguments to launch the centered interactive panel:
 
 ```text
-┌──────────────── Gerenciador de Bateria Universal ────────────────┐
-│ Bateria: 79% (Tomada Conectada 🔌) | Lenovo ThinkPad             │
-│ Auto-Discharge: [ATIVADO ✅] | Limites: 75% - 80%                │
-├──────────────────────────────────────────────────────────────────┤
-│ Escolha uma opção (Setas ↑/↓, Números 0-5 ou ESC para sair):     │
-│                                                                  │
-│    1 📊 Ver Status Detalhado da Bateria                          │
-│    2 ⚡ Desativar Descarga Inteligente                           │
-│    3 🎯 Alterar Limites de Carga (75% - 80%)                     │
-│    4 ⚡ Forçar Descarga Imediata na Tomada                       │
-│    5 🔌 Restaurar Padrão de Fábrica (100%)                       │
-│    0 🚪 Sair do Programa                                         │
-│                                                                  │
-├──────────────────────────────────────────────────────────────────┤
-│          [ENTER] Selecionar               [ESC / q] Sair         │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────── Universal Linux Battery Manager ────────────────┐
+│ Battery: 79% (AC Connected [AC]) | Lenovo ThinkPad              │
+│ Auto-Discharge: [ENABLED [ON]] | Limits: 75% - 80%              │
+├─────────────────────────────────────────────────────────────────┤
+│ Select an option (Arrows Up/Down, 0-6, or ESC to exit):         │
+│                                                                 │
+│   1 [i] View Detailed Battery Status                            │
+│   2 [*] Disable Smart Auto-Discharge                            │
+│   3 [#] Change Charge Limits (75% - 80%)                        │
+│   4 [!] Force Immediate Discharge on AC                         │
+│   5 [~] Restore Factory Defaults (100%)                         │
+│   6 [L] Language / Idioma: [English -> Portugues]               │
+│   0 [X] Exit Program                                            │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│ [ENTER] Select                         [ESC / q] Exit           │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### ⌨️ Keyboard Controls
 - **Up / Down Arrows (`↑` / `↓`)** or **Vim Keys (`k` / `j`)**: Move selection highlight.
-- **Numbers (`1` - `5`, `0`)**: Trigger menu actions directly.
+- **Numbers (`1` - `6`, `0`)**: Trigger menu actions directly.
 - **`ENTER`**: Confirm selection.
 - **`ESC` or `q`**: Instantaneously exit any screen, popup, or submenu.
 
@@ -110,26 +109,27 @@ sudo ./linux-battery-manager.sh install
 ```
 
 **What the installer does:**
-- Copies the binary to `/usr/local/bin/gerenciador-bateria` and creates a convenient symlink `/usr/local/bin/gerenciador_bateria`.
-- Generates the configuration file at `/etc/gerenciador-bateria.conf` (default: `75%` start, `80%` stop, `AUTO_DISCHARGE=true`).
-- Cleans up legacy battery services (`thinkpad-battery-charge-limit.service`, etc.).
-- Installs, enables, and starts `gerenciador-bateria.service` in `systemd`.
+- Copies the binary to `/usr/local/bin/linux-battery-manager` and creates a convenient symlink `/usr/local/bin/linux_battery_manager`.
+- Generates the configuration file at `/etc/linux-battery-manager.conf` (default: `75%` start, `80%` stop, `AUTO_DISCHARGE=true`, `UI_LANG=pt`).
+- Cleans up legacy services (`gerenciador-bateria.service`, `thinkpad-battery-charge-limit.service`, etc.).
+- Installs, enables, and starts `linux-battery-manager.service` in `systemd`.
 
 ### 2. Quick CLI Commands
 
 | Command | Description |
 | :--- | :--- |
-| `sudo gerenciador-bateria` | Opens the interactive Terminal UI (TUI) |
-| `sudo gerenciador-bateria on` | Enables Smart AC Auto-Discharge |
-| `sudo gerenciador-bateria off` | Disables Smart AC Auto-Discharge (keeps static limits) |
-| `sudo gerenciador-bateria set 75 80` | Sets custom Start (`75%`) and Stop (`80%`) thresholds |
-| `gerenciador-bateria status` | Displays detailed battery health, energy (Wh/Ah), and service status |
-| `sudo gerenciador-bateria discharge` | Manually triggers immediate discharge on AC down to Start threshold |
-| `sudo gerenciador-bateria stop-discharge` | Cancels manual discharge and returns to `auto` mode |
-| `sudo gerenciador-bateria restore` | Restores factory default charging (0% - 100%) |
-| `gerenciador-bateria check` | Runs hardware compatibility diagnostics |
-| `gerenciador-bateria test` | Runs automated 5-step integrity checks |
-| `sudo gerenciador-bateria remove` | Completely uninstalls the script, config, and `systemd` service |
+| `sudo linux-battery-manager` | Opens the interactive Terminal UI (TUI) |
+| `sudo linux-battery-manager on` | Enables Smart AC Auto-Discharge |
+| `sudo linux-battery-manager off` | Disables Smart AC Auto-Discharge (keeps static limits) |
+| `sudo linux-battery-manager set 75 80` | Sets custom Start (`75%`) and Stop (`80%`) thresholds |
+| `sudo linux-battery-manager lang en` | Changes interface language (`en` or `pt`) |
+| `linux-battery-manager status` | Displays detailed battery health, energy (Wh/Ah), and service status |
+| `sudo linux-battery-manager discharge` | Manually triggers immediate discharge on AC down to Start threshold |
+| `sudo linux-battery-manager stop-discharge` | Cancels manual discharge and returns to `auto` mode |
+| `sudo linux-battery-manager restore` | Restores factory default charging (0% - 100%) |
+| `linux-battery-manager check` | Runs hardware compatibility diagnostics |
+| `linux-battery-manager test` | Runs automated 5-step integrity checks |
+| `sudo linux-battery-manager remove` | Completely uninstalls the script, config, and `systemd` service |
 
 ---
 
@@ -141,15 +141,16 @@ sudo ./linux-battery-manager.sh install
 
 ## 📖 Visão Geral
 
-O **Gerenciador de Bateria Universal (`gerenciador-bateria`)** é um utilitário *standalone* em Bash e daemon do `systemd`, sem dependências externas, projetado para maximizar a vida útil de baterias de íons de lítio em notebooks Linux (**Arch Linux, Ubuntu, Debian, Fedora, openSUSE**, etc.).
+O **Gerenciador de Bateria Universal (`linux-battery-manager`)** é um utilitário *standalone* em Bash e daemon do `systemd`, sem dependências externas, projetado para maximizar a vida útil de baterias de íons de lítio em notebooks Linux (**Arch Linux, Ubuntu, Debian, Fedora, openSUSE**, etc.).
 
-Diferente de scripts comuns que apenas gravam limites estáticos no `/sys/class/power_supply`, este projeto traz a **Descarga Inteligente na Tomada (Auto-Discharge)** e uma **Engine TUI Nativa de Baixa Latência** construída diretamente sobre `/dev/tty`.
+Diferente de scripts comuns que apenas gravam limites estáticos no `/sys/class/power_supply`, este projeto traz a **Descarga Inteligente na Tomada (Auto-Discharge)** e uma **Engine TUI Nativa Centralizada** construída diretamente sobre `/dev/tty`, sem emojis para evitar desformatações no terminal.
 
 ### ✨ Principais Recursos
 
 - 🤖 **Detecção 100% Automática de Hardware**: Compatível nativamente com **Lenovo (ThinkPad / IdeaPad)**, **ASUS (ROG / ZenBook / TUF / VivoBook)**, **Dell / Alienware** e interfaces genéricas `sysfs` do kernel Linux.
 - ⚡ **Descarga Inteligente na Tomada (`force-discharge`)**: Resolve o "Problema do Congelamento em 100%" quando o notebook é carregado desligado.
-- 🖥️ **Interface Visual TUI Nativa de Latência Zero**: Desenvolvida em Bash puro com códigos ANSI lendo direto de `/dev/tty` — suporta Setas (`↑`/`↓`), teclas estilo Vim (`j`/`k`), atalhos numéricos (`0-5`) e **saída instantânea com 1 único toque na tecla `ESC`**, sem depender de `whiptail` ou `dialog`.
+- 🖥️ **Interface Visual TUI Nativa Centralizada**: Desenvolvida em Bash puro com códigos ANSI lendo direto de `/dev/tty` — suporta Setas (`↑`/`↓`), teclas estilo Vim (`j`/`k`), atalhos numéricos (`0-6`) e **saída instantânea com 1 único toque na tecla `ESC`**, sem depender de `whiptail` ou `dialog`.
+- 🌐 **Seletor de Idioma Integrado**: Alterne instantaneamente entre Português e Inglês pelo menu da TUI ou pelo terminal (`lang pt` / `lang en`).
 - 🛡️ **Persistência Pós-Suspensão e Hibernação**: Monitora e reaplica automaticamente os limites caso a BIOS/EC resete os valores ao acordar da suspensão.
 - 🔒 **Daemon `systemd` Blindado**: Roda em segundo plano consumindo virtualmente **0% de CPU**, com isolamento de segurança (`ProtectSystem=strict`) e travas de proteção.
 
@@ -160,7 +161,7 @@ Diferente de scripts comuns que apenas gravam limites estáticos no `/sys/class/
 ### O Problema do "Congelamento em 100%"
 Se você conectar o carregador enquanto o notebook está **desligado**, o controlador embarcado (EC) da placa-mãe ignora o sistema operacional e carrega a bateria até **100%**. Em ferramentas comuns, ao ligar o notebook na tomada, ele entra em modo *AC Bypass* (usando energia direto da fonte) e deixa a bateria **estagnada em 100% sob alta tensão elétrica e estresse térmico** por dias.
 
-### Como o `gerenciador-bateria` Resolve Isso
+### Como o `linux-battery-manager` Resolve Isso
 ```text
 [Liga na Tomada em 100%] ──► Daemon detecta Carga (100%) > Limite de Parada (80%)
                          ──► Ativa 'force-discharge' no kernel mesmo plugado na tomada
@@ -176,30 +177,31 @@ Se você conectar o carregador enquanto o notebook está **desligado**, o contro
 
 ## 🖥️ Painel Visual Interativo (Terminal TUI)
 
-Ao executar `sudo gerenciador-bateria` (ou `sudo gerenciador_bateria`) sem argumentos, o painel interativo é aberto instantaneamente:
+Ao executar `sudo linux-battery-manager` (ou `sudo linux_battery_manager`) sem argumentos, o painel interativo centralizado é aberto instantaneamente:
 
 ```text
-┌──────────────── Gerenciador de Bateria Universal ────────────────┐
-│ Bateria: 79% (Tomada Conectada 🔌) | Lenovo ThinkPad             │
-│ Auto-Discharge: [ATIVADO ✅] | Limites: 75% - 80%                │
-├──────────────────────────────────────────────────────────────────┤
-│ Escolha uma opção (Setas ↑/↓, Números 0-5 ou ESC para sair):     │
-│                                                                  │
-│    1 📊 Ver Status Detalhado da Bateria                          │
-│    2 ⚡ Desativar Descarga Inteligente                           │
-│    3 🎯 Alterar Limites de Carga (75% - 80%)                     │
-│    4 ⚡ Forçar Descarga Imediata na Tomada                       │
-│    5 🔌 Restaurar Padrão de Fábrica (100%)                       │
-│    0 🚪 Sair do Programa                                         │
-│                                                                  │
-├──────────────────────────────────────────────────────────────────┤
-│          [ENTER] Selecionar               [ESC / q] Sair         │
-└──────────────────────────────────────────────────────────────────┘
+┌──────────────── Universal Linux Battery Manager ────────────────┐
+│ Bateria: 79% (Tomada Conectada [AC]) | Lenovo ThinkPad         │
+│ Auto-Discharge: [ATIVADO [ON]] | Limites: 75% - 80%             │
+├─────────────────────────────────────────────────────────────────┤
+│ Escolha uma opcao (Setas Cima/Baixo, 0-6 ou ESC para sair):     │
+│                                                                 │
+│   1 [i] Ver Status Detalhado da Bateria                         │
+│   2 [*] Desativar Descarga Inteligente                          │
+│   3 [#] Alterar Limites de Carga (75% - 80%)                    │
+│   4 [!] Forcar Descarga Imediata na Tomada                      │
+│   5 [~] Restaurar Padrao de Fabrica (100%)                      │
+│   6 [L] Idioma / Language: [Portugues -> English]               │
+│   0 [X] Sair do Programa                                        │
+│                                                                 │
+├─────────────────────────────────────────────────────────────────┤
+│ [ENTER] Selecionar                     [ESC / q] Sair           │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### ⌨️ Controles pelo Teclado
 - **Setas (`↑` / `↓`)** ou **Teclas Vim (`k` / `j`)**: Navega entre as opções do menu.
-- **Números (`1` - `5`, `0`)**: Aciona a opção correspondente imediatamente.
+- **Números (`1` - `6`, `0`)**: Aciona a opção correspondente imediatamente.
 - **`ENTER`**: Confirma a opção selecionada.
 - **`ESC` ou `q`**: Fecha o programa ou cancela caixas de diálogo **instantaneamente no primeiro toque**.
 
@@ -231,28 +233,29 @@ sudo ./linux-battery-manager.sh install
 ```
 
 **O que o instalador faz:**
-- Instala o binário em `/usr/local/bin/gerenciador-bateria` e cria um atalho automático em `/usr/local/bin/gerenciador_bateria` (funciona com hífen ou *underline*).
-- Cria o arquivo de configuração `/etc/gerenciador-bateria.conf` (padrão: início em `75%`, parada em `80%`, `AUTO_DISCHARGE=true`).
-- Remove serviços antigos conflitantes (`thinkpad-battery-charge-limit.service`, etc.).
-- Cria, habilita no boot e inicia o serviço `gerenciador-bateria.service` no `systemd`.
+- Instala o binário em `/usr/local/bin/linux-battery-manager` e cria um atalho automático em `/usr/local/bin/linux_battery_manager` (funciona com hífen ou *underline*).
+- Cria o arquivo de configuração `/etc/linux-battery-manager.conf` (padrão: início em `75%`, parada em `80%`, `AUTO_DISCHARGE=true`, `UI_LANG=pt`).
+- Remove serviços antigos conflitantes (`gerenciador-bateria.service`, `thinkpad-battery-charge-limit.service`, etc.).
+- Cria, habilita no boot e inicia o serviço `linux-battery-manager.service` no `systemd`.
 
 ### 2. Referência de Comandos Rápidos
 
 | Comando | Descrição |
 | :--- | :--- |
-| `sudo gerenciador-bateria` | Abre o Menu Visual Interativo (TUI) |
-| `sudo gerenciador-bateria on` | Ativa a Descarga Inteligente na tomada |
-| `sudo gerenciador-bateria off` | Desativa a Descarga Inteligente (mantém apenas os limites estáticos) |
-| `sudo gerenciador-bateria set 75 80` | Define novos limites de Início (`75%`) e Parada (`80%`) |
-| `gerenciador-bateria status` | Exibe relatório completo da bateria (Wh/Ah, ciclos, tomada e serviço) |
-| `sudo gerenciador-bateria discharge` | Força a descarga imediata na tomada até o limite de início |
-| `sudo gerenciador-bateria stop-discharge` | Cancela a descarga forçada e retorna ao modo `auto` |
-| `sudo gerenciador-bateria restore` | Restaura os limites para o padrão de fábrica (100%) |
-| `gerenciador-bateria check` | Executa diagnóstico completo de compatibilidade do hardware |
-| `gerenciador-bateria test` | Executa bateria de 5 testes de integridade do sistema |
-| `sudo gerenciador-bateria disable` | Desabilita temporariamente o serviço e restaura 100% |
-| `sudo gerenciador-bateria enable` | Reabilita o serviço no `systemd` |
-| `sudo gerenciador-bateria remove` | Desinstala completamente o script, configurações e serviço |
+| `sudo linux-battery-manager` | Abre o Menu Visual Interativo (TUI) |
+| `sudo linux-battery-manager on` | Ativa a Descarga Inteligente na tomada |
+| `sudo linux-battery-manager off` | Desativa a Descarga Inteligente (mantém apenas os limites estáticos) |
+| `sudo linux-battery-manager set 75 80` | Define novos limites de Início (`75%`) e Parada (`80%`) |
+| `sudo linux-battery-manager lang pt` | Altera o idioma da interface (`pt` ou `en`) |
+| `linux-battery-manager status` | Exibe relatório completo da bateria (Wh/Ah, ciclos, tomada e serviço) |
+| `sudo linux-battery-manager discharge` | Força a descarga imediata na tomada até o limite de início |
+| `sudo linux-battery-manager stop-discharge` | Cancela a descarga forçada e retorna ao modo `auto` |
+| `sudo linux-battery-manager restore` | Restaura os limites para o padrão de fábrica (100%) |
+| `linux-battery-manager check` | Executa diagnóstico completo de compatibilidade do hardware |
+| `linux-battery-manager test` | Executa bateria de 5 testes de integridade do sistema |
+| `sudo linux-battery-manager disable` | Desabilita temporariamente o serviço e restaura 100% |
+| `sudo linux-battery-manager enable` | Reabilita o serviço no `systemd` |
+| `sudo linux-battery-manager remove` | Desinstala completamente o script, configurações e serviço |
 
 ---
 
@@ -260,12 +263,13 @@ sudo ./linux-battery-manager.sh install
 
 | Caminho | Função |
 | :--- | :--- |
-| `/usr/local/bin/gerenciador-bateria` | Binário principal instalado |
-| `/usr/local/bin/gerenciador_bateria` | Link simbólico (alias com *underline*) |
-| `/etc/gerenciador-bateria.conf` | Arquivo de configuração persistente |
-| `/etc/systemd/system/gerenciador-bateria.service` | Unidade de serviço do `systemd` |
+| `/usr/local/bin/linux-battery-manager` | Binário principal instalado |
+| `/usr/local/bin/linux_battery_manager` | Link simbólico (alias com *underline*) |
+| `/etc/linux-battery-manager.conf` | Arquivo de configuração persistente |
+| `/etc/systemd/system/linux-battery-manager.service` | Unidade de serviço do `systemd` |
 
 ---
+
 
 ## 📄 Why this?
 
