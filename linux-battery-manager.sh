@@ -1,17 +1,19 @@
 #!/usr/bin/env bash
 # ============================================================================
-# linux-battery-manager (v2.2.0 Universal)
+# linux-battery-manager (v2.3.1 Universal Multi-Init)
 # Universal Intelligent Battery Charge Limit & Auto-Discharge Manager for Linux
 # Natively compatible with Lenovo (ThinkPad), ASUS, and Dell / Alienware
-# Don't work with HP! (i don´t know, i didn't use with a hp laptop)
+# Multi-Init Support: systemd, OpenRC, Runit, dinit, SysVinit
+# Note: HP laptops are currently untested / not officially supported.
 #
 # Features:
 #   - 100% automatic hardware vendor detection
 #   - Start and Stop charge threshold control
 #   - Smart AC Auto-Discharge (via charge_behaviour)
+#   - Multi-Init Daemon Support (systemd, OpenRC, Runit, dinit, SysVinit)
+#   - Automatic sleep/resume hook persistence across suspend & hibernate
 #   - Centered, Zero-Latency Native TUI (Zero emojis, universal compatibility)
 #   - Built-in Bilingual Interface (Portuguese & English with persistent config)
-#   - Background systemd daemon with post-suspend persistence
 #   - Fast CLI commands (on, off, status, set, menu, lang)
 #
 # Author: Alan Schaffer
@@ -22,7 +24,7 @@ set -euo pipefail
 
 # ========================== GENERAL CONFIGURATION ===========================
 readonly SCRIPT_NAME="linux-battery-manager"
-readonly SCRIPT_VERSION="2.2.0"
+readonly SCRIPT_VERSION="2.3.1"
 
 # Default threshold values (%)
 DEFAULT_START_THRESHOLD=75
@@ -55,10 +57,25 @@ readonly WMI_STOP_FILE="${WMI_SYSMAN_DIR}/CustomChargeStop/current_value"
 readonly CONF_FILE="/etc/linux-battery-manager.conf"
 readonly LEGACY_CONF_FILE="/etc/gerenciador-bateria.conf"
 readonly SERVICE_NAME="linux-battery-manager.service"
-readonly SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}"
 readonly SCRIPT_INSTALL_PATH="/usr/local/bin/linux-battery-manager"
 readonly SCRIPT_ALIAS_PATH="/usr/local/bin/linux_battery_manager"
 readonly BACKUP_DIR="/etc/linux-battery-manager/backups"
+readonly PID_FILE="/run/linux-battery-manager.pid"
+readonly MANUAL_DISCHARGE_FLAG="/run/linux-battery-manager.manual_discharge"
+
+# Multi-Init system paths
+readonly INIT_SYSTEMD_SERVICE="/etc/systemd/system/${SERVICE_NAME}"
+readonly INIT_OPENRC_SERVICE="/etc/init.d/linux-battery-manager"
+readonly INIT_RUNIT_SERVICE_DIR="/etc/sv/linux-battery-manager"
+readonly INIT_RUNIT_ENABLE_DIR_VAR="/var/service"
+readonly INIT_RUNIT_ENABLE_DIR_ETC="/etc/service"
+readonly INIT_RUNIT_ENABLE_DIR_RUN="/run/runit/service"
+readonly INIT_DINIT_SERVICE="/etc/dinit.d/linux-battery-manager"
+readonly INIT_SYSV_SERVICE="/etc/init.d/linux-battery-manager"
+readonly SLEEP_HOOK_DIR_SYSTEMD="/usr/lib/systemd/system-sleep"
+readonly SLEEP_HOOK_DIR_ELOGIND_LIB="/lib/elogind/system-sleep"
+readonly SLEEP_HOOK_DIR_ELOGIND_ETC="/etc/elogind/system-sleep"
+readonly SLEEP_HOOK_DIR_PM="/etc/pm/sleep.d"
 
 # Legacy services and binaries for clean migration
 readonly LEGACY_SERVICES=(
@@ -72,16 +89,18 @@ readonly LEGACY_BINARIES=(
     "/usr/local/bin/gerenciador_bateria"
 )
 
+TUI_ACTIVE=0
+
 # ========================== VENDOR DETECTION ================================
 
 detect_vendor() {
     local vendor
     vendor=$(cat /sys/class/dmi/id/sys_vendor 2>/dev/null || echo "Unknown")
     case "${vendor,,}" in
-        *lenovo*)           echo "lenovo" ;;
-        *asus*|*asustek*)   echo "asus" ;;
-        *dell*|*alienware*) echo "dell" ;;
-        *)                  echo "generic" ;;
+        (*lenovo*)           echo "lenovo" ;;
+        (*asus*|*asustek*)   echo "asus" ;;
+        (*dell*|*alienware*) echo "dell" ;;
+        (*)                  echo "generic" ;;
     esac
 }
 
@@ -89,10 +108,10 @@ detect_vendor_display() {
     local v
     v=$(detect_vendor)
     case "${v}" in
-        lenovo)  echo "Lenovo ThinkPad" ;;
-        asus)    echo "ASUS" ;;
-        dell)    echo "Dell / Alienware" ;;
-        generic)
+        (lenovo)  echo "Lenovo ThinkPad" ;;
+        (asus)    echo "ASUS" ;;
+        (dell)    echo "Dell / Alienware" ;;
+        (generic)
             if [[ "${UI_LANG:-pt}" == "en" ]]; then
                 echo "Generic / Other"
             else
@@ -111,12 +130,30 @@ load_config() {
     DELL_MODE="custom"
     UI_LANG="${DEFAULT_UI_LANG}"
 
+    local target_conf=""
     if [[ -f "${CONF_FILE}" ]]; then
-        # shellcheck source=/dev/null
-        source "${CONF_FILE}" 2>/dev/null || true
+        target_conf="${CONF_FILE}"
     elif [[ -f "${LEGACY_CONF_FILE}" ]]; then
-        # shellcheck source=/dev/null
-        source "${LEGACY_CONF_FILE}" 2>/dev/null || true
+        target_conf="${LEGACY_CONF_FILE}"
+    fi
+
+    if [[ -n "${target_conf}" ]]; then
+        while IFS='=' read -r key val; do
+            [[ "${key}" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${key}" ]] && continue
+            key="${key//[[:space:]]/}"
+            val="${val#\"}"
+            val="${val%\"}"
+            val="${val#\'}"
+            val="${val%\'}"
+            case "${key}" in
+                (START_THRESHOLD) [[ "${val}" =~ ^[0-9]+$ ]] && START_THRESHOLD="${val}" ;;
+                (END_THRESHOLD)   [[ "${val}" =~ ^[0-9]+$ ]] && END_THRESHOLD="${val}" ;;
+                (AUTO_DISCHARGE)  [[ "${val}" == "true" || "${val}" == "false" ]] && AUTO_DISCHARGE="${val}" ;;
+                (DELL_MODE)       DELL_MODE="${val}" ;;
+                (UI_LANG)         UI_LANG="${val}" ;;
+            esac
+        done < "${target_conf}"
     fi
 
     if [[ "${UI_LANG}" != "en" && "${UI_LANG}" != "pt" ]]; then
@@ -187,11 +224,11 @@ setup_strings() {
         L_MSG_FD_OK_TITLE="Immediate Discharge"
         L_MSG_FD_OK_BODY="Force-discharge mode activated on AC down to ${START_THRESHOLD}%."
         L_MSG_FD_ERR_TITLE="Notice"
-        L_MSG_FD_ERR_BODY="Could not activate force-discharge on this hardware."
+        L_MSG_FD_ERR_BODY="Could not activate force-discharge (unsupported or already <= ${START_THRESHOLD}%)."
         L_YN_RESTORE_TITLE="Confirm Restore"
         L_YN_RESTORE_PROMPT="Restore charge thresholds to factory defaults (100%)?"
         L_MSG_RESTORE_TITLE="Restored"
-        L_MSG_RESTORE_BODY="Thresholds restored to 100% successfully."
+        L_MSG_RESTORE_BODY="Thresholds restored to 100% and saved to configuration."
     else
         L_TITLE="Gerenciador de Bateria Universal"
         L_BAT="Bateria"
@@ -233,11 +270,11 @@ setup_strings() {
         L_MSG_FD_OK_TITLE="Descarga Imediata"
         L_MSG_FD_OK_BODY="Modo force-discharge ativado na tomada ate atingir ${START_THRESHOLD}%."
         L_MSG_FD_ERR_TITLE="Aviso"
-        L_MSG_FD_ERR_BODY="Nao foi possivel ativar a descarga forcada neste hardware."
+        L_MSG_FD_ERR_BODY="Nao foi possivel ativar a descarga (nao suportado ou carga <= ${START_THRESHOLD}%)."
         L_YN_RESTORE_TITLE="Confirmar Restauracao"
         L_YN_RESTORE_PROMPT="Deseja restaurar os limites para o padrao de fabrica (100%)?"
         L_MSG_RESTORE_TITLE="Restaurado"
-        L_MSG_RESTORE_BODY="Limites restaurados para 100% com sucesso."
+        L_MSG_RESTORE_BODY="Limites restaurados para 100% e salvos na configuracao."
     fi
 }
 
@@ -258,8 +295,16 @@ log_error() {
     logger -t "${SCRIPT_NAME}" --id=$$ -p user.err "ERROR: $*" 2>/dev/null || true
 }
 
+cleanup_tui() {
+    if (( TUI_ACTIVE == 1 )); then
+        printf '\033[?25h\033[0m\033[2J\033[H' > /dev/tty 2>/dev/null || true
+        TUI_ACTIVE=0
+    fi
+}
+
 check_root() {
     if [[ $EUID -ne 0 ]]; then
+        cleanup_tui
         if [[ "${UI_LANG:-pt}" == "en" ]]; then
             log_error "This command requires root privileges. Please run with 'sudo'."
         else
@@ -269,13 +314,28 @@ check_root() {
     fi
 }
 
+is_pid_matching() {
+    local pid="$1"
+    [[ -n "${pid}" && "${pid}" =~ ^[0-9]+$ ]] || return 1
+    [[ "${pid}" != "$$" ]] || return 1
+    if [[ -d "/proc/${pid}" ]]; then
+        if [[ -f "/proc/${pid}/cmdline" ]]; then
+            grep -qa -E "linux-battery-manager|${SCRIPT_NAME}" "/proc/${pid}/cmdline" 2>/dev/null && return 0
+            return 1
+        fi
+        return 0
+    fi
+    kill -0 "${pid}" 2>/dev/null && return 0
+    return 1
+}
+
 is_ac_online() {
     for psy in /sys/class/power_supply/*; do
         if [[ -d "${psy}" ]]; then
             local type online
             type=$(cat "${psy}/type" 2>/dev/null || echo "")
             online=$(cat "${psy}/online" 2>/dev/null || echo "0")
-            if [[ ("${type}" == "Mains" || "${type}" == "USB") && "${online}" == "1" ]]; then
+            if [[ "${online}" == "1" && "${type,,}" != "battery" ]]; then
                 return 0
             fi
         fi
@@ -298,8 +358,11 @@ get_charge_behaviour() {
 set_charge_behaviour() {
     local behaviour="$1"
     if is_force_discharge_supported; then
-        echo "${behaviour}" > "${BEHAVIOUR_FILE}"
-        log_info "Charge behaviour set to: ${behaviour}"
+        if echo "${behaviour}" > "${BEHAVIOUR_FILE}" 2>/dev/null; then
+            log_info "Charge behaviour set to: ${behaviour}"
+        else
+            log_warn "Failed to set behaviour to ${behaviour}. Kernel might be busy."
+        fi
     else
         log_warn "charge_behaviour unavailable or force-discharge unsupported on this machine."
     fi
@@ -328,6 +391,32 @@ detect_dell_backend() {
     else
         echo "none"
     fi
+}
+
+# Safe ordered sysfs threshold writer to avoid kernel EINVAL when start >= end
+write_sysfs_thresholds() {
+    local start_val="$1"
+    local end_val="$2"
+
+    if [[ -e "${START_THRESHOLD_FILE}" && -e "${END_THRESHOLD_FILE}" ]]; then
+        local cur_start="0"
+        cur_start=$(cat "${START_THRESHOLD_FILE}" 2>/dev/null || echo "0")
+        [[ "${cur_start}" =~ ^[0-9]+$ ]] || cur_start="0"
+
+        if (( end_val < cur_start )); then
+            echo "${start_val}" > "${START_THRESHOLD_FILE}" 2>/dev/null || return 1
+            echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || return 1
+        else
+            echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || return 1
+            echo "${start_val}" > "${START_THRESHOLD_FILE}" 2>/dev/null || return 1
+        fi
+        return 0
+    elif [[ -e "${END_THRESHOLD_FILE}" ]]; then
+        echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || return 1
+        return 0
+    fi
+
+    return 1
 }
 
 # ========================== HARDWARE CHECK ==================================
@@ -364,7 +453,7 @@ check_hardware() {
         echo "     Cycles:       $(cat "${BAT_PATH}/cycle_count" 2>/dev/null || echo '?')"
     else
         echo "[ERR] Battery NOT found at ${BAT_PATH}"
-        ((errors += 1))
+        errors=$(( errors + 1 ))
     fi
     echo
 
@@ -375,7 +464,7 @@ check_hardware() {
             echo "[INFO] charge_control_end_threshold available via Dell SMBIOS/WMI"
         else
             echo "[ERR] charge_control_end_threshold NOT available"
-            ((errors += 1))
+            errors=$(( errors + 1 ))
         fi
     fi
 
@@ -399,7 +488,7 @@ check_hardware() {
     echo
 
     echo "==============================================================="
-    if [[ $errors -eq 0 ]]; then
+    if (( errors == 0 )); then
         echo "  [OK] Hardware 100% compatible!"
     else
         echo "  [WARN] Warnings or errors found. Check messages above."
@@ -407,7 +496,7 @@ check_hardware() {
     echo "==============================================================="
     echo
 
-    return $errors
+    return $(( errors > 0 ? 1 : 0 ))
 }
 
 # ========================== APPLY THRESHOLDS ================================
@@ -424,7 +513,7 @@ apply_thresholds() {
     fi
 
     case "${vendor}" in
-        lenovo)
+        (lenovo)
             if (( start_val < 0 || start_val > 99 || end_val < 1 || end_val > 100 )); then
                 log_error "Invalid limits for ThinkPad (start: 0-99, end: 1-100)."
                 return 1
@@ -434,34 +523,20 @@ apply_thresholds() {
                 return 1
             fi
 
-            local cur_start="0"
-            [[ -e "${START_THRESHOLD_FILE}" ]] && cur_start=$(cat "${START_THRESHOLD_FILE}" 2>/dev/null || echo "0")
-            [[ "${cur_start}" =~ ^[0-9]+$ ]] || cur_start="0"
-
-            if [[ -e "${START_THRESHOLD_FILE}" ]]; then
-                if (( end_val < cur_start )); then
-                    echo "${start_val}" > "${START_THRESHOLD_FILE}"
-                    echo "${end_val}" > "${END_THRESHOLD_FILE}"
-                else
-                    echo "${end_val}" > "${END_THRESHOLD_FILE}"
-                    echo "${start_val}" > "${START_THRESHOLD_FILE}"
-                fi
-            elif [[ -e "${END_THRESHOLD_FILE}" ]]; then
-                echo "${end_val}" > "${END_THRESHOLD_FILE}"
-            else
-                log_error "Threshold files not found in ${BAT_PATH}."
+            if ! write_sysfs_thresholds "${start_val}" "${end_val}"; then
+                log_error "Failed to write threshold files in ${BAT_PATH}."
                 return 1
             fi
             log_info "[OK] ThinkPad limits applied: Start=${start_val}% | Stop=${end_val}%"
             ;;
 
-        asus)
+        (asus)
             if (( end_val < 1 || end_val > 100 )); then
                 log_error "Invalid ASUS limit (1-100)."
                 return 1
             fi
             if [[ -e "${END_THRESHOLD_FILE}" ]]; then
-                echo "${end_val}" > "${END_THRESHOLD_FILE}"
+                echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || return 1
                 log_info "[OK] ASUS limit applied: Stop=${end_val}% (Resume ~${start_val}%)"
             else
                 log_error "File ${END_THRESHOLD_FILE} not found."
@@ -469,7 +544,29 @@ apply_thresholds() {
             fi
             ;;
 
-        dell)
+        (dell)
+            # Allow 0/100 standard mode restoration on Dell
+            if (( start_val == 0 && end_val == 100 )); then
+                local dell_be
+                dell_be=$(detect_dell_backend)
+                case "${dell_be}" in
+                    (libsmbios)
+                        smbios-battery-ctl --set-charging-mode=standard >/dev/null 2>&1 || true
+                        ;;
+                    (dell_wmi_sysman)
+                        [[ -f "${WMI_MODE_FILE}" ]] && echo "Standard" > "${WMI_MODE_FILE}" 2>/dev/null || true
+                        ;;
+                    (sysfs)
+                        write_sysfs_thresholds 0 100 || true
+                        ;;
+                    (cctk)
+                        cctk --PrimaryBattChargeCfg=Standard >/dev/null 2>&1 || true
+                        ;;
+                esac
+                log_info "[OK] Dell standard charging mode (100%) applied."
+                return 0
+            fi
+
             if (( start_val < 50 || start_val > 95 || end_val < 55 || end_val > 100 || start_val >= end_val )); then
                 log_error "Invalid Dell limits (Start: 50-95, Stop: 55-100, Start < Stop)."
                 return 1
@@ -477,43 +574,55 @@ apply_thresholds() {
             local dell_be
             dell_be=$(detect_dell_backend)
             case "${dell_be}" in
-                libsmbios)
-                    smbios-battery-ctl --set-custom-charge-interval "${start_val}" "${end_val}" >/dev/null 2>&1 || \
-                    smbios-battery-ctl "--set-custom-charge-interval=${start_val}-${end_val}" >/dev/null 2>&1 || true
+                (libsmbios)
+                    if ! { smbios-battery-ctl --set-custom-charge-interval "${start_val}" "${end_val}" >/dev/null 2>&1 || \
+                           smbios-battery-ctl "--set-custom-charge-interval=${start_val}-${end_val}" >/dev/null 2>&1; }; then
+                        log_error "Failed to set Dell custom charge interval via libsmbios."
+                        return 1
+                    fi
                     smbios-battery-ctl --set-charging-mode=custom >/dev/null 2>&1 || true
                     log_info "[OK] Dell limits applied via libsmbios (${start_val}% - ${end_val}%)."
                     ;;
-                dell_wmi_sysman)
+                (dell_wmi_sysman)
                     if [[ -f "${WMI_START_FILE}" && -f "${WMI_STOP_FILE}" && -f "${WMI_MODE_FILE}" ]]; then
-                        echo "Custom" > "${WMI_MODE_FILE}" 2>/dev/null || true
-                        echo "${start_val}" > "${WMI_START_FILE}" 2>/dev/null || true
-                        echo "${end_val}" > "${WMI_STOP_FILE}" 2>/dev/null || true
+                        echo "Custom" > "${WMI_MODE_FILE}" 2>/dev/null || return 1
+                        echo "${start_val}" > "${WMI_START_FILE}" 2>/dev/null || return 1
+                        echo "${end_val}" > "${WMI_STOP_FILE}" 2>/dev/null || return 1
                         log_info "[OK] Dell limits applied via dell_wmi_sysman."
+                    else
+                        log_error "Dell WMI sysman files not found."
+                        return 1
                     fi
                     ;;
-                sysfs)
-                    [[ -e "${START_THRESHOLD_FILE}" ]] && echo "${start_val}" > "${START_THRESHOLD_FILE}" 2>/dev/null || true
-                    [[ -e "${END_THRESHOLD_FILE}" ]] && echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || true
+                (sysfs)
+                    if ! write_sysfs_thresholds "${start_val}" "${end_val}"; then
+                        log_error "Failed to apply Dell limits via sysfs."
+                        return 1
+                    fi
                     log_info "[OK] Dell limits applied via sysfs."
                     ;;
-                *)
-                    if [[ -e "${END_THRESHOLD_FILE}" ]]; then
-                        echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || true
+                (cctk)
+                    if ! cctk "--PrimaryBattChargeCfg=Custom:${start_val}-${end_val}" >/dev/null 2>&1; then
+                        log_error "Failed to apply Dell limits via cctk."
+                        return 1
                     fi
+                    log_info "[OK] Dell limits applied via cctk."
+                    ;;
+                (*)
+                    log_error "No supported Dell battery backend available."
+                    return 1
                     ;;
             esac
             ;;
 
-        *)
+        (*)
             if (( start_val < 0 || start_val > 99 || end_val < 1 || end_val > 100 || (start_val > 0 && start_val >= end_val) )); then
                 log_error "Invalid limits (start: 0-99, end: 1-100, start < end)."
                 return 1
             fi
-            if [[ -e "${START_THRESHOLD_FILE}" && -e "${END_THRESHOLD_FILE}" ]]; then
-                echo "${start_val}" > "${START_THRESHOLD_FILE}" 2>/dev/null || true
-                echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || true
-            elif [[ -e "${END_THRESHOLD_FILE}" ]]; then
-                echo "${end_val}" > "${END_THRESHOLD_FILE}" 2>/dev/null || true
+            if ! write_sysfs_thresholds "${start_val}" "${end_val}"; then
+                log_error "Threshold files not found or not writable in ${BAT_PATH}."
+                return 1
             fi
             log_info "[OK] Generic limits applied: ${start_val}% - ${end_val}%"
             ;;
@@ -523,7 +632,10 @@ apply_thresholds() {
 }
 
 restore_defaults() {
+    local update_conf="${1:-true}"
     log_info "Restoring factory default settings (100%)..."
+
+    rm -f "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
     if [[ -e "${BEHAVIOUR_FILE}" ]]; then
         echo "auto" > "${BEHAVIOUR_FILE}" 2>/dev/null || true
     fi
@@ -532,20 +644,22 @@ restore_defaults() {
     vendor=$(detect_vendor)
 
     case "${vendor}" in
-        dell)
+        (dell)
             if command -v smbios-battery-ctl >/dev/null 2>&1; then
                 smbios-battery-ctl --set-charging-mode=standard >/dev/null 2>&1 || true
             elif [[ -f "${WMI_MODE_FILE}" ]]; then
                 echo "Standard" > "${WMI_MODE_FILE}" 2>/dev/null || true
+            elif command -v cctk >/dev/null 2>&1; then
+                cctk --PrimaryBattChargeCfg=Standard >/dev/null 2>&1 || true
             fi
             ;;
     esac
 
-    if [[ -e "${END_THRESHOLD_FILE}" ]]; then
-        echo 100 > "${END_THRESHOLD_FILE}" 2>/dev/null || true
-    fi
-    if [[ -e "${START_THRESHOLD_FILE}" ]]; then
-        echo 0 > "${START_THRESHOLD_FILE}" 2>/dev/null || true
+    write_sysfs_thresholds 0 100 2>/dev/null || true
+
+    if [[ "${update_conf}" == "true" && -f "${CONF_FILE}" ]]; then
+        load_config
+        save_config 0 100 "${AUTO_DISCHARGE}" "standard" "${UI_LANG}"
     fi
 
     log_info "[OK] Thresholds restored to factory default (100%)."
@@ -558,8 +672,15 @@ run_daemon() {
     log_info "Starting ${SCRIPT_NAME} continuous monitoring daemon..."
 
     local discharge_in_progress=0
+    local sleep_pid=""
+
+    echo $$ > "${PID_FILE}" 2>/dev/null || true
 
     cleanup_daemon() {
+        if [[ -n "${sleep_pid}" ]]; then
+            kill -TERM "${sleep_pid}" 2>/dev/null || true
+        fi
+        rm -f "${PID_FILE}" "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
         log_info "Daemon stopped. Ensuring 'auto' charge behaviour..."
         if is_force_discharge_supported; then
             echo "auto" > "${BEHAVIOUR_FILE}" 2>/dev/null || true
@@ -568,18 +689,28 @@ run_daemon() {
     }
     trap cleanup_daemon SIGINT SIGTERM SIGHUP EXIT
 
+    reload_daemon() {
+        discharge_in_progress=0
+        if [[ -n "${sleep_pid}" ]]; then
+            kill -TERM "${sleep_pid}" 2>/dev/null || true
+        fi
+    }
+    trap reload_daemon SIGUSR1
+
     load_config
     apply_thresholds "${START_THRESHOLD}" "${END_THRESHOLD}" || true
+
+    local cur_cap=""
+    local cur_sys_end=""
+    local current_behaviour=""
 
     while true; do
         load_config
 
-        local cur_cap
         cur_cap=$(cat "${BAT_PATH}/capacity" 2>/dev/null || echo "")
 
         if [[ -n "${cur_cap}" && "${cur_cap}" =~ ^[0-9]+$ ]]; then
             if [[ -e "${END_THRESHOLD_FILE}" ]]; then
-                local cur_sys_end
                 cur_sys_end=$(cat "${END_THRESHOLD_FILE}" 2>/dev/null || echo "")
                 if [[ "${cur_sys_end}" != "${END_THRESHOLD}" ]]; then
                     log_info "Sysfs threshold changed (${cur_sys_end} -> ${END_THRESHOLD}). Re-applying..."
@@ -587,23 +718,47 @@ run_daemon() {
                 fi
             fi
 
-            if [[ "${AUTO_DISCHARGE:-true}" == "true" ]] && is_force_discharge_supported; then
-                local current_behaviour
+            if is_force_discharge_supported; then
                 current_behaviour=$(get_charge_behaviour)
 
-                if is_ac_online; then
-                    if (( cur_cap > END_THRESHOLD )); then
-                        if [[ "${current_behaviour}" != "force-discharge" ]]; then
-                            log_info "Battery above threshold (${cur_cap}% > ${END_THRESHOLD}%)."
-                            log_info "Activating 'force-discharge': draining on AC down to ${START_THRESHOLD}%..."
-                            set_charge_behaviour "force-discharge"
-                            discharge_in_progress=1
+                # Safety guard: never allow force-discharge below 20%
+                if (( cur_cap <= 20 )) && [[ "${current_behaviour}" == "force-discharge" ]]; then
+                    log_warn "SAFETY: Low battery (${cur_cap}%). Aborting force-discharge."
+                    set_charge_behaviour "auto"
+                    discharge_in_progress=0
+                    rm -f "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
+                elif [[ -f "${MANUAL_DISCHARGE_FLAG}" ]]; then
+                    local target_start=$(( START_THRESHOLD > 20 ? START_THRESHOLD : 20 ))
+                    if ! is_ac_online || (( cur_cap <= target_start )); then
+                        log_info "Manual discharge target (${target_start}%) reached or AC unplugged. Returning to 'auto'."
+                        set_charge_behaviour "auto"
+                        discharge_in_progress=0
+                        rm -f "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
+                    elif [[ "${current_behaviour}" != "force-discharge" ]]; then
+                        set_charge_behaviour "force-discharge"
+                    fi
+                elif [[ "${AUTO_DISCHARGE:-true}" == "true" ]] && (( END_THRESHOLD < 100 && START_THRESHOLD > 0 )); then
+                    if is_ac_online; then
+                        if (( cur_cap > END_THRESHOLD )); then
+                            if [[ "${current_behaviour}" != "force-discharge" ]]; then
+                                log_info "Battery above threshold (${cur_cap}% > ${END_THRESHOLD}%)."
+                                log_info "Activating 'force-discharge': draining on AC down to ${START_THRESHOLD}%..."
+                                set_charge_behaviour "force-discharge"
+                                discharge_in_progress=1
+                            fi
+                        elif (( cur_cap <= START_THRESHOLD )); then
+                            if [[ "${current_behaviour}" == "force-discharge" || ${discharge_in_progress} -eq 1 ]]; then
+                                log_info "Start threshold reached (${cur_cap}% <= ${START_THRESHOLD}%)."
+                                log_info "Restoring 'auto' mode: recharging to ${END_THRESHOLD}% and resting on AC."
+                                set_charge_behaviour "auto"
+                                discharge_in_progress=0
+                            fi
                         fi
-                    elif (( cur_cap <= START_THRESHOLD )); then
-                        if [[ "${current_behaviour}" == "force-discharge" || ${discharge_in_progress} -eq 1 ]]; then
-                            log_info "Start threshold reached (${cur_cap}% <= ${START_THRESHOLD}%)."
-                            log_info "Restoring 'auto' mode: recharging to ${END_THRESHOLD}% and resting on AC."
+                    else
+                        if [[ "${current_behaviour}" == "force-discharge" ]]; then
                             set_charge_behaviour "auto"
+                        fi
+                        if (( cur_cap <= START_THRESHOLD )); then
                             discharge_in_progress=0
                         fi
                     fi
@@ -611,30 +766,20 @@ run_daemon() {
                     if [[ "${current_behaviour}" == "force-discharge" ]]; then
                         set_charge_behaviour "auto"
                     fi
-                    if (( cur_cap <= START_THRESHOLD )); then
-                        discharge_in_progress=0
-                    fi
-                fi
-
-                if (( cur_cap <= 20 )) && [[ "$(get_charge_behaviour)" == "force-discharge" ]]; then
-                    log_warn "SAFETY: Low battery (${cur_cap}%). Aborting force-discharge."
-                    set_charge_behaviour "auto"
-                    discharge_in_progress=0
-                fi
-            else
-                if [[ "$(get_charge_behaviour)" == "force-discharge" ]]; then
-                    set_charge_behaviour "auto"
                     discharge_in_progress=0
                 fi
             fi
         fi
 
         sleep 20 &
-        wait $! || true
+        sleep_pid=$!
+        wait "${sleep_pid}" 2>/dev/null || true
+        sleep_pid=""
     done
 }
 
 stop_daemon_action() {
+    rm -f "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
     if is_force_discharge_supported; then
         echo "auto" > "${BEHAVIOUR_FILE}" 2>/dev/null || true
     fi
@@ -649,28 +794,36 @@ set_auto_discharge_cmd() {
     local choice="${1:-toggle}"
 
     case "${choice,,}" in
-        on|enable|true|1|ativar|ativado)
+        (on|enable|true|1|ativar|ativado)
             save_config "${START_THRESHOLD}" "${END_THRESHOLD}" "true" "${DELL_MODE}" "${UI_LANG}"
             log_info "[OK] Smart Auto-Discharge ENABLED."
             ;;
-        off|disable|false|0|desativar|desativado)
+        (off|disable|false|0|desativar|desativado)
             save_config "${START_THRESHOLD}" "${END_THRESHOLD}" "false" "${DELL_MODE}" "${UI_LANG}"
+            rm -f "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
             if is_force_discharge_supported; then
                 echo "auto" > "${BEHAVIOUR_FILE}" 2>/dev/null || true
             fi
+            if [[ -f "${PID_FILE}" ]]; then
+                local d_pid
+                d_pid=$(cat "${PID_FILE}" 2>/dev/null || true)
+                if [[ -n "${d_pid}" ]] && is_pid_matching "${d_pid}"; then
+                    kill -USR1 "${d_pid}" 2>/dev/null || true
+                fi
+            fi
             log_info "[OK] Smart Auto-Discharge DISABLED."
             ;;
-        toggle)
+        (toggle)
             if [[ "${AUTO_DISCHARGE:-true}" == "true" ]]; then
                 set_auto_discharge_cmd "off"
             else
                 set_auto_discharge_cmd "on"
             fi
             ;;
-        status)
+        (status)
             log_info "Auto-Discharge Status: ${AUTO_DISCHARGE}"
             ;;
-        *)
+        (*)
             log_error "Invalid option: '${choice}'. Use 'on' or 'off'."
             return 1
             ;;
@@ -684,20 +837,20 @@ set_language_cmd() {
     load_config
     local next_lang="${1:-toggle}"
     case "${next_lang,,}" in
-        en|english|ingles)
+        (en|english|ingles)
             UI_LANG="en"
             ;;
-        pt|pt-br|portugues|portuguese)
+        (pt|pt-br|portugues|portuguese)
             UI_LANG="pt"
             ;;
-        toggle)
+        (toggle)
             if [[ "${UI_LANG}" == "en" ]]; then
                 UI_LANG="pt"
             else
                 UI_LANG="en"
             fi
             ;;
-        *)
+        (*)
             log_error "Invalid language: '${next_lang}'. Use 'pt' or 'en'."
             return 1
             ;;
@@ -719,24 +872,363 @@ force_discharge_cmd() {
 
     local cur_cap
     cur_cap=$(cat "${BAT_PATH}/capacity" 2>/dev/null || echo "0")
+    local target_start=$(( START_THRESHOLD > 20 ? START_THRESHOLD : 20 ))
 
-    if (( cur_cap <= START_THRESHOLD )); then
-        log_info "Battery is already at ${cur_cap}% (<= limit ${START_THRESHOLD}%). Discharge not needed."
-        return 0
+    if (( cur_cap <= target_start )); then
+        log_info "Battery is already at ${cur_cap}% (<= limit ${target_start}%). Discharge not needed."
+        return 1
     fi
 
-    log_info "Forcing immediate discharge on AC (from ${cur_cap}% down to ${START_THRESHOLD}%)..."
+    echo "${target_start}" > "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
+    log_info "Forcing immediate discharge on AC (from ${cur_cap}% down to ${target_start}%)..."
     set_charge_behaviour "force-discharge"
 }
 
 stop_discharge_cmd() {
     check_root
+    rm -f "${MANUAL_DISCHARGE_FLAG}" 2>/dev/null || true
     if ! is_force_discharge_supported; then
         log_error "Current hardware does not support 'charge_behaviour'."
         return 1
     fi
     log_info "Cancelling forced discharge. Returning to 'auto' mode..."
     set_charge_behaviour "auto"
+    if [[ -f "${PID_FILE}" ]]; then
+        local d_pid
+        d_pid=$(cat "${PID_FILE}" 2>/dev/null || true)
+        if [[ -n "${d_pid}" ]] && is_pid_matching "${d_pid}"; then
+            kill -USR1 "${d_pid}" 2>/dev/null || true
+        fi
+    fi
+}
+
+# ========================== INIT SYSTEM DETECTION & MANAGEMENT =============
+
+detect_init_system() {
+    if [[ -d /run/systemd/system ]]; then
+        echo "systemd"
+        return 0
+    fi
+    if [[ -d /run/openrc || -f /run/openrc/softlevel ]] || (command -v rc-status >/dev/null 2>&1 && rc-status -r >/dev/null 2>&1); then
+        echo "openrc"
+        return 0
+    fi
+    if [[ -d /run/runit ]] || pidof runit >/dev/null 2>&1 || [[ -f /etc/runit/1 ]] || \
+       (command -v sv >/dev/null 2>&1 && { [[ -d /var/service ]] || [[ -d /etc/service ]] || [[ -d /run/runit/service ]]; }); then
+        echo "runit"
+        return 0
+    fi
+    if [[ -d /run/dinit ]] || (command -v dinitctl >/dev/null 2>&1 && pidof dinit >/dev/null 2>&1); then
+        echo "dinit"
+        return 0
+    fi
+    if [[ -d /etc/init.d ]] && (command -v start-stop-daemon >/dev/null 2>&1 || command -v service >/dev/null 2>&1); then
+        echo "sysvinit"
+        return 0
+    fi
+    echo "unknown"
+}
+
+detect_init_display() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)   echo "systemd" ;;
+        (openrc)    echo "OpenRC" ;;
+        (runit)     echo "Runit" ;;
+        (dinit)     echo "dinit" ;;
+        (sysvinit)  echo "SysVinit" ;;
+        (*)         echo "Generic / Standalone" ;;
+    esac
+}
+
+is_init_service_installed() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)   [[ -f "${INIT_SYSTEMD_SERVICE}" ]] ;;
+        (openrc)    [[ -f "${INIT_OPENRC_SERVICE}" ]] && grep -q "openrc-run" "${INIT_OPENRC_SERVICE}" 2>/dev/null ;;
+        (runit)     [[ -d "${INIT_RUNIT_SERVICE_DIR}" ]] ;;
+        (dinit)     [[ -f "${INIT_DINIT_SERVICE}" ]] ;;
+        (sysvinit)  [[ -f "${INIT_SYSV_SERVICE}" ]] && ! grep -q "openrc-run" "${INIT_SYSV_SERVICE}" 2>/dev/null ;;
+        (*)         return 1 ;;
+    esac
+}
+
+is_init_service_active() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)
+            systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null
+            ;;
+        (openrc)
+            if command -v rc-service >/dev/null 2>&1; then
+                rc-service "${SCRIPT_NAME}" status 2>/dev/null | grep -qi "started"
+            else
+                if [[ -f "${PID_FILE}" ]]; then
+                    local p; p=$(cat "${PID_FILE}" 2>/dev/null || true)
+                    is_pid_matching "${p}"
+                else
+                    pgrep -f "${SCRIPT_NAME} daemon" >/dev/null 2>&1
+                fi
+            fi
+            ;;
+        (runit)
+            if command -v sv >/dev/null 2>&1; then
+                sv status "${SCRIPT_NAME}" 2>/dev/null | grep -q "^run:"
+            else
+                pgrep -f "${SCRIPT_NAME} daemon" >/dev/null 2>&1
+            fi
+            ;;
+        (dinit)
+            if command -v dinitctl >/dev/null 2>&1; then
+                dinitctl status "${SCRIPT_NAME}" 2>/dev/null | grep -q "STARTED"
+            else
+                pgrep -f "${SCRIPT_NAME} daemon" >/dev/null 2>&1
+            fi
+            ;;
+        (sysvinit)
+            if [[ -f "${PID_FILE}" ]]; then
+                local p; p=$(cat "${PID_FILE}" 2>/dev/null || true)
+                if is_pid_matching "${p}"; then
+                    return 0
+                fi
+            fi
+            if command -v service >/dev/null 2>&1; then
+                service "${SCRIPT_NAME}" status >/dev/null 2>&1
+            else
+                pgrep -f "${SCRIPT_NAME} daemon" >/dev/null 2>&1
+            fi
+            ;;
+        (*)
+            pgrep -f "${SCRIPT_NAME} daemon" >/dev/null 2>&1
+            ;;
+    esac
+}
+
+is_init_service_enabled() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)
+            systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null
+            ;;
+        (openrc)
+            if command -v rc-update >/dev/null 2>&1; then
+                rc-update show 2>/dev/null | grep -qi "${SCRIPT_NAME}"
+            else
+                [[ -e "/etc/runlevels/default/${SCRIPT_NAME}" ]]
+            fi
+            ;;
+        (runit)
+            [[ -L "${INIT_RUNIT_ENABLE_DIR_VAR}/${SCRIPT_NAME}" || -L "${INIT_RUNIT_ENABLE_DIR_ETC}/${SCRIPT_NAME}" || -L "${INIT_RUNIT_ENABLE_DIR_RUN}/${SCRIPT_NAME}" ]]
+            ;;
+        (dinit)
+            if command -v dinitctl >/dev/null 2>&1; then
+                dinitctl is-enabled "${SCRIPT_NAME}" 2>/dev/null || [[ -f "/etc/dinit.d/boot.d/${SCRIPT_NAME}" ]]
+            else
+                [[ -f "/etc/dinit.d/boot.d/${SCRIPT_NAME}" ]]
+            fi
+            ;;
+        (sysvinit)
+            compgen -G "/etc/rc*.d/S*${SCRIPT_NAME}" >/dev/null 2>&1
+            ;;
+        (*)
+            return 1
+            ;;
+    esac
+}
+
+start_init_service() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl restart "${SERVICE_NAME}"
+            ;;
+        (openrc)
+            rc-service "${SCRIPT_NAME}" restart 2>/dev/null || rc-service "${SCRIPT_NAME}" start
+            ;;
+        (runit)
+            if command -v sv >/dev/null 2>&1; then
+                sv restart "${SCRIPT_NAME}" 2>/dev/null || sv up "${SCRIPT_NAME}"
+            fi
+            ;;
+        (dinit)
+            if command -v dinitctl >/dev/null 2>&1; then
+                dinitctl restart "${SCRIPT_NAME}" 2>/dev/null || dinitctl start "${SCRIPT_NAME}"
+            fi
+            ;;
+        (sysvinit)
+            if command -v service >/dev/null 2>&1; then
+                service "${SCRIPT_NAME}" restart 2>/dev/null || service "${SCRIPT_NAME}" start
+            elif [[ -x "${INIT_SYSV_SERVICE}" ]]; then
+                "${INIT_SYSV_SERVICE}" restart 2>/dev/null || "${INIT_SYSV_SERVICE}" start
+            fi
+            ;;
+        (*)
+            nohup "${SCRIPT_INSTALL_PATH}" daemon >/dev/null 2>&1 &
+            ;;
+    esac
+}
+
+stop_init_service() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)
+            if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+                systemctl stop "${SERVICE_NAME}" 2>/dev/null || true
+            fi
+            ;;
+        (openrc)
+            if command -v rc-service >/dev/null 2>&1; then
+                rc-service "${SCRIPT_NAME}" stop 2>/dev/null || true
+            fi
+            ;;
+        (runit)
+            if command -v sv >/dev/null 2>&1; then
+                sv down "${SCRIPT_NAME}" 2>/dev/null || true
+            fi
+            ;;
+        (dinit)
+            if command -v dinitctl >/dev/null 2>&1; then
+                dinitctl stop "${SCRIPT_NAME}" 2>/dev/null || true
+            fi
+            ;;
+        (sysvinit)
+            if command -v service >/dev/null 2>&1; then
+                service "${SCRIPT_NAME}" stop 2>/dev/null || true
+            elif [[ -x "${INIT_SYSV_SERVICE}" ]]; then
+                "${INIT_SYSV_SERVICE}" stop 2>/dev/null || true
+            fi
+            ;;
+    esac
+
+    if [[ -f "${PID_FILE}" ]]; then
+        local p
+        p=$(cat "${PID_FILE}" 2>/dev/null || true)
+        if [[ -n "${p}" && "${p}" != "$$" ]] && is_pid_matching "${p}"; then
+            kill -TERM "${p}" 2>/dev/null || true
+        fi
+        rm -f "${PID_FILE}" 2>/dev/null || true
+    fi
+    stop_daemon_action
+}
+
+enable_init_service() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)
+            systemctl daemon-reload 2>/dev/null || true
+            systemctl enable "${SERVICE_NAME}" 2>/dev/null || true
+            ;;
+        (openrc)
+            if command -v rc-update >/dev/null 2>&1; then
+                rc-update add "${SCRIPT_NAME}" default 2>/dev/null || true
+            fi
+            ;;
+        (runit)
+            local target_dir=""
+            if [[ -d "${INIT_RUNIT_ENABLE_DIR_VAR}" ]]; then
+                target_dir="${INIT_RUNIT_ENABLE_DIR_VAR}"
+            elif [[ -d "${INIT_RUNIT_ENABLE_DIR_ETC}" ]]; then
+                target_dir="${INIT_RUNIT_ENABLE_DIR_ETC}"
+            elif [[ -d "${INIT_RUNIT_ENABLE_DIR_RUN}" ]]; then
+                target_dir="${INIT_RUNIT_ENABLE_DIR_RUN}"
+            fi
+            if [[ -n "${target_dir}" && -d "${INIT_RUNIT_SERVICE_DIR}" ]]; then
+                ln -sfn "${INIT_RUNIT_SERVICE_DIR}" "${target_dir}/${SCRIPT_NAME}"
+            fi
+            ;;
+        (dinit)
+            if command -v dinitctl >/dev/null 2>&1; then
+                dinitctl enable "${SCRIPT_NAME}" 2>/dev/null || true
+            fi
+            ;;
+        (sysvinit)
+            if command -v update-rc.d >/dev/null 2>&1; then
+                update-rc.d "${SCRIPT_NAME}" defaults 2>/dev/null || true
+            elif command -v chkconfig >/dev/null 2>&1; then
+                chkconfig --add "${SCRIPT_NAME}" 2>/dev/null || true
+                chkconfig "${SCRIPT_NAME}" on 2>/dev/null || true
+            fi
+            ;;
+    esac
+}
+
+disable_init_service() {
+    local init_sys
+    init_sys=$(detect_init_system)
+    case "${init_sys}" in
+        (systemd)
+            if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+                systemctl disable "${SERVICE_NAME}" 2>/dev/null || true
+            fi
+            ;;
+        (openrc)
+            if command -v rc-update >/dev/null 2>&1; then
+                rc-update del "${SCRIPT_NAME}" default 2>/dev/null || true
+            fi
+            ;;
+        (runit)
+            rm -f "${INIT_RUNIT_ENABLE_DIR_VAR}/${SCRIPT_NAME}" 2>/dev/null || true
+            rm -f "${INIT_RUNIT_ENABLE_DIR_ETC}/${SCRIPT_NAME}" 2>/dev/null || true
+            rm -f "${INIT_RUNIT_ENABLE_DIR_RUN}/${SCRIPT_NAME}" 2>/dev/null || true
+            ;;
+        (dinit)
+            if command -v dinitctl >/dev/null 2>&1; then
+                dinitctl disable "${SCRIPT_NAME}" 2>/dev/null || true
+            fi
+            ;;
+        (sysvinit)
+            if command -v update-rc.d >/dev/null 2>&1; then
+                update-rc.d -f "${SCRIPT_NAME}" remove 2>/dev/null || true
+            elif command -v chkconfig >/dev/null 2>&1; then
+                chkconfig "${SCRIPT_NAME}" off 2>/dev/null || true
+                chkconfig --del "${SCRIPT_NAME}" 2>/dev/null || true
+            fi
+            ;;
+    esac
+}
+
+install_sleep_hooks() {
+    local hook_script="/etc/linux-battery-manager/sleep-hook"
+    mkdir -p "/etc/linux-battery-manager"
+    cat > "${hook_script}" << 'HOOK_EOF'
+#!/bin/sh
+# Re-apply battery thresholds immediately upon waking up
+case "$1" in
+    (post|thaw|resume)
+        /usr/local/bin/linux-battery-manager apply >/dev/null 2>&1 || true
+        ;;
+esac
+HOOK_EOF
+    chmod 755 "${hook_script}"
+
+    if [[ -d "${SLEEP_HOOK_DIR_SYSTEMD}" ]]; then
+        ln -sf "${hook_script}" "${SLEEP_HOOK_DIR_SYSTEMD}/linux-battery-manager" 2>/dev/null || true
+    fi
+    if [[ -d "${SLEEP_HOOK_DIR_ELOGIND_LIB}" ]]; then
+        ln -sf "${hook_script}" "${SLEEP_HOOK_DIR_ELOGIND_LIB}/linux-battery-manager" 2>/dev/null || true
+    fi
+    if [[ -d "${SLEEP_HOOK_DIR_ELOGIND_ETC}" ]]; then
+        ln -sf "${hook_script}" "${SLEEP_HOOK_DIR_ELOGIND_ETC}/linux-battery-manager" 2>/dev/null || true
+    fi
+    if [[ -d "${SLEEP_HOOK_DIR_PM}" ]]; then
+        ln -sf "${hook_script}" "${SLEEP_HOOK_DIR_PM}/99-linux-battery-manager" 2>/dev/null || true
+    fi
+}
+
+remove_sleep_hooks() {
+    rm -f "${SLEEP_HOOK_DIR_SYSTEMD}/linux-battery-manager" 2>/dev/null || true
+    rm -f "${SLEEP_HOOK_DIR_ELOGIND_LIB}/linux-battery-manager" 2>/dev/null || true
+    rm -f "${SLEEP_HOOK_DIR_ELOGIND_ETC}/linux-battery-manager" 2>/dev/null || true
+    rm -f "${SLEEP_HOOK_DIR_PM}/99-linux-battery-manager" 2>/dev/null || true
+    rm -f "/etc/linux-battery-manager/sleep-hook" 2>/dev/null || true
 }
 
 # ========================== INSTALLATION / MIGRATION ========================
@@ -745,7 +1237,11 @@ install_service() {
     check_root
     load_config
 
-    echo "Installing ${SCRIPT_NAME} v${SCRIPT_VERSION}..."
+    local init_sys init_name
+    init_sys=$(detect_init_system)
+    init_name=$(detect_init_display)
+
+    echo "Installing ${SCRIPT_NAME} v${SCRIPT_VERSION} (Init system: ${init_name})..."
     echo
 
     if ! check_hardware; then
@@ -753,20 +1249,21 @@ install_service() {
     fi
     echo
 
-    # Clean up legacy services (including old gerenciador-bateria.service)
     for s in "${LEGACY_SERVICES[@]}"; do
-        if systemctl is-active --quiet "${s}" 2>/dev/null; then
-            log_info "Stopping legacy service: ${s}"
-            systemctl stop "${s}" 2>/dev/null || true
-        fi
-        if systemctl is-enabled --quiet "${s}" 2>/dev/null; then
-            log_info "Disabling legacy service: ${s}"
-            systemctl disable "${s}" 2>/dev/null || true
+        if command -v systemctl >/dev/null 2>&1; then
+            if systemctl is-active --quiet "${s}" 2>/dev/null; then
+                log_info "Stopping legacy service: ${s}"
+                systemctl stop "${s}" 2>/dev/null || true
+            fi
+            if systemctl is-enabled --quiet "${s}" 2>/dev/null; then
+                log_info "Disabling legacy service: ${s}"
+                systemctl disable "${s}" 2>/dev/null || true
+            fi
         fi
         rm -f "/etc/systemd/system/${s}" 2>/dev/null || true
+        rm -f "/etc/init.d/${s%.service}" 2>/dev/null || true
     done
 
-    # Clean up old binaries
     for b in "${LEGACY_BINARIES[@]}"; do
         rm -f "${b}" 2>/dev/null || true
     done
@@ -786,15 +1283,22 @@ install_service() {
         log_info "Existing configuration preserved at: ${CONF_FILE}"
     fi
 
-    cp "$0" "${SCRIPT_INSTALL_PATH}"
+    local src_real dst_real
+    src_real=$(realpath "$0" 2>/dev/null || echo "$0")
+    dst_real=$(realpath "${SCRIPT_INSTALL_PATH}" 2>/dev/null || echo "${SCRIPT_INSTALL_PATH}")
+    if [[ "${src_real}" != "${dst_real}" ]]; then
+        cp -f "$0" "${SCRIPT_INSTALL_PATH}"
+    fi
     chmod 755 "${SCRIPT_INSTALL_PATH}"
     ln -sf "${SCRIPT_INSTALL_PATH}" "${SCRIPT_ALIAS_PATH}"
     log_info "Binary installed at: ${SCRIPT_INSTALL_PATH} (and alias ${SCRIPT_ALIAS_PATH})"
 
-    cat > "${SERVICE_FILE}" << 'UNIT_EOF'
+    case "${init_sys}" in
+        (systemd)
+            cat > "${INIT_SYSTEMD_SERVICE}" << 'UNIT_EOF'
 [Unit]
 Description=Universal Linux Battery Charge Limit & Auto-Discharge Manager
-Documentation=https://github.com
+Documentation=https://github.com/AlanSchaffer/linux-battery-manager
 After=multi-user.target suspend.target hibernate.target hybrid-sleep.target
 
 [Service]
@@ -802,13 +1306,10 @@ Type=simple
 Restart=always
 RestartSec=10s
 ExecStart=/usr/local/bin/linux-battery-manager daemon
-ExecStop=/usr/local/bin/linux-battery-manager stop
+ExecStopPost=/usr/local/bin/linux-battery-manager post-stop
 
-ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
-NoNewPrivileges=no
-ReadWritePaths=-/sys/class/power_supply -/sys/devices -/sys/class/firmware-attributes -/etc
 
 StandardOutput=journal
 StandardError=journal
@@ -817,18 +1318,154 @@ SyslogIdentifier=linux-battery-manager
 [Install]
 WantedBy=multi-user.target
 UNIT_EOF
+            log_info "systemd service created: ${INIT_SYSTEMD_SERVICE}"
+            ;;
 
-    log_info "systemd service created: ${SERVICE_FILE}"
+        (openrc)
+            cat > "${INIT_OPENRC_SERVICE}" << 'OPENRC_EOF'
+#!/sbin/openrc-run
+description="Universal Linux Battery Charge Limit & Auto-Discharge Manager"
+supervisor="supervise-daemon"
+command="/usr/local/bin/linux-battery-manager"
+command_args="daemon"
+retry="SIGTERM/10 SIGKILL/5"
 
-    systemctl daemon-reload
-    systemctl enable "${SERVICE_NAME}"
-    systemctl restart "${SERVICE_NAME}"
-    log_info "Service enabled and started successfully."
+depend() {
+    need localmount
+    after bootmisc
+}
+
+stop_post() {
+    /usr/local/bin/linux-battery-manager post-stop >/dev/null 2>&1 || true
+}
+OPENRC_EOF
+            chmod 755 "${INIT_OPENRC_SERVICE}"
+            log_info "OpenRC service created: ${INIT_OPENRC_SERVICE}"
+            ;;
+
+        (runit)
+            mkdir -p "${INIT_RUNIT_SERVICE_DIR}"
+            cat > "${INIT_RUNIT_SERVICE_DIR}/run" << 'RUNIT_RUN_EOF'
+#!/bin/sh
+exec 2>&1
+exec /usr/local/bin/linux-battery-manager daemon
+RUNIT_RUN_EOF
+            cat > "${INIT_RUNIT_SERVICE_DIR}/finish" << 'RUNIT_FINISH_EOF'
+#!/bin/sh
+/usr/local/bin/linux-battery-manager post-stop >/dev/null 2>&1 || true
+RUNIT_FINISH_EOF
+            chmod 755 "${INIT_RUNIT_SERVICE_DIR}/run" "${INIT_RUNIT_SERVICE_DIR}/finish"
+            log_info "Runit service created: ${INIT_RUNIT_SERVICE_DIR}"
+            ;;
+
+        (dinit)
+            mkdir -p /etc/dinit.d
+            cat > "${INIT_DINIT_SERVICE}" << 'DINIT_EOF'
+type = process
+command = /usr/local/bin/linux-battery-manager daemon
+stop-command = /usr/local/bin/linux-battery-manager post-stop
+restart = yes
+smooth-recovery = yes
+pid-file = /run/linux-battery-manager.pid
+DINIT_EOF
+            log_info "dinit service created: ${INIT_DINIT_SERVICE}"
+            ;;
+
+        (sysvinit|*)
+            cat > "${INIT_SYSV_SERVICE}" << 'SYSV_EOF'
+#!/bin/sh
+### BEGIN INIT INFO
+# Provides:          linux-battery-manager
+# Required-Start:    $local_fs $remote_fs
+# Required-Stop:     $local_fs $remote_fs
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: Universal Linux Battery Charge Limit Manager
+### END INIT INFO
+
+PIDFILE="/run/linux-battery-manager.pid"
+DAEMON="/usr/local/bin/linux-battery-manager"
+NAME="linux-battery-manager"
+
+case "$1" in
+    (start)
+        echo "Starting $NAME..."
+        if command -v start-stop-daemon >/dev/null 2>&1; then
+            start-stop-daemon --start --background --make-pidfile --pidfile "$PIDFILE" --exec "$DAEMON" -- daemon
+        else
+            nohup "$DAEMON" daemon >/dev/null 2>&1 &
+            echo $! > "$PIDFILE"
+        fi
+        ;;
+    (stop)
+        echo "Stopping $NAME..."
+        if command -v start-stop-daemon >/dev/null 2>&1; then
+            start-stop-daemon --stop --pidfile "$PIDFILE" --oknodo --retry 5
+        elif [ -f "$PIDFILE" ]; then
+            PID_TO_KILL=$(cat "$PIDFILE" 2>/dev/null)
+            if [ -n "$PID_TO_KILL" ] && [ "$PID_TO_KILL" != "$$" ]; then
+                if [ -d "/proc/$PID_TO_KILL" ]; then
+                    if [ ! -f "/proc/$PID_TO_KILL/cmdline" ] || grep -qa "$NAME" "/proc/$PID_TO_KILL/cmdline" 2>/dev/null; then
+                        kill -TERM "$PID_TO_KILL" 2>/dev/null || true
+                    fi
+                elif kill -0 "$PID_TO_KILL" 2>/dev/null; then
+                    kill -TERM "$PID_TO_KILL" 2>/dev/null || true
+                fi
+            fi
+        fi
+        rm -f "$PIDFILE"
+        "$DAEMON" post-stop >/dev/null 2>&1 || true
+        ;;
+    (restart|force-reload)
+        $0 stop
+        sleep 1
+        $0 start
+        ;;
+    (status)
+        if command -v start-stop-daemon >/dev/null 2>&1; then
+            start-stop-daemon --status --pidfile "$PIDFILE"
+        elif [ -f "$PIDFILE" ]; then
+            PID_CHECK=$(cat "$PIDFILE" 2>/dev/null)
+            if [ -n "$PID_CHECK" ] && [ "$PID_CHECK" != "$$" ]; then
+                if [ -d "/proc/$PID_CHECK" ]; then
+                    if [ ! -f "/proc/$PID_CHECK/cmdline" ] || grep -qa "$NAME" "/proc/$PID_CHECK/cmdline" 2>/dev/null; then
+                        echo "$NAME is running."
+                        exit 0
+                    fi
+                elif kill -0 "$PID_CHECK" 2>/dev/null; then
+                    echo "$NAME is running."
+                    exit 0
+                fi
+            fi
+            echo "$NAME is not running."
+            exit 1
+        else
+            echo "$NAME is not running."
+            exit 1
+        fi
+        ;;
+    (*)
+        echo "Usage: $0 {start|stop|restart|status}" >&2
+        exit 1
+        ;;
+esac
+exit 0
+SYSV_EOF
+            chmod 755 "${INIT_SYSV_SERVICE}"
+            log_info "SysVinit service created: ${INIT_SYSV_SERVICE}"
+            ;;
+    esac
+
+    install_sleep_hooks
+    enable_init_service
+    start_init_service
+    log_info "Service enabled and started successfully (${init_name})."
 
     echo
     echo "==============================================================="
     echo "  [OK] Installation completed successfully!"
     echo "  Hardware detected: $(detect_vendor_display)"
+    echo "  Init system:       ${init_name}"
     echo
     echo "  Quick commands:"
     echo "    sudo linux-battery-manager          — Open Interactive TUI"
@@ -845,64 +1482,83 @@ UNIT_EOF
 
 disable_service() {
     check_root
-    log_info "Disabling service..."
+    local init_name
+    init_name=$(detect_init_display)
+    log_info "Disabling service (${init_name})..."
 
-    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-        systemctl stop "${SERVICE_NAME}"
-        log_info "Service stopped."
-    fi
+    stop_init_service
+    disable_init_service
 
-    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-        systemctl disable "${SERVICE_NAME}"
-        log_info "Service disabled."
-    fi
-
-    restore_defaults
+    restore_defaults "false"
     echo
-    log_info "[OK] Service disabled and limits restored to 100%."
+    log_info "[OK] Service disabled and hardware limits restored to 100%."
     log_info "To re-enable: sudo linux-battery-manager enable"
 }
 
 enable_service() {
     check_root
-    if [[ ! -f "${SERVICE_FILE}" ]]; then
-        log_error "Service not installed. Run 'install' first."
+    local init_name
+    init_name=$(detect_init_display)
+    if ! is_init_service_installed; then
+        log_error "Service not installed for ${init_name}. Run 'install' first."
         exit 1
     fi
 
-    systemctl daemon-reload
-    systemctl enable "${SERVICE_NAME}"
-    systemctl restart "${SERVICE_NAME}"
-    log_info "[OK] Service enabled and started."
+    enable_init_service
+    start_init_service
+    log_info "[OK] Service enabled and started (${init_name})."
 }
 
 remove_service() {
     check_root
-    echo "Removing ${SCRIPT_NAME}..."
+    local init_sys init_name
+    init_sys=$(detect_init_system)
+    init_name=$(detect_init_display)
+
+    echo "Removing ${SCRIPT_NAME} (${init_name})..."
     echo
 
-    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-        systemctl stop "${SERVICE_NAME}"
-    fi
+    stop_init_service
+    disable_init_service
+    restore_defaults "false"
+    remove_sleep_hooks
 
-    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-        systemctl disable "${SERVICE_NAME}"
-    fi
+    case "${init_sys}" in
+        (systemd)
+            rm -f "${INIT_SYSTEMD_SERVICE}"
+            if command -v systemctl >/dev/null 2>&1; then
+                systemctl daemon-reload 2>/dev/null || true
+                log_info "systemd reloaded."
+            fi
+            ;;
+        (openrc)
+            rm -f "${INIT_OPENRC_SERVICE}"
+            ;;
+        (runit)
+            rm -rf "${INIT_RUNIT_SERVICE_DIR}"
+            rm -f "${INIT_RUNIT_ENABLE_DIR_VAR}/${SCRIPT_NAME}"
+            rm -f "${INIT_RUNIT_ENABLE_DIR_ETC}/${SCRIPT_NAME}"
+            rm -f "${INIT_RUNIT_ENABLE_DIR_RUN}/${SCRIPT_NAME}"
+            ;;
+        (dinit)
+            rm -f "${INIT_DINIT_SERVICE}"
+            rm -f "/etc/dinit.d/boot.d/${SCRIPT_NAME}" 2>/dev/null || true
+            ;;
+        (sysvinit)
+            rm -f "${INIT_SYSV_SERVICE}"
+            ;;
+    esac
 
-    restore_defaults
-
-    rm -f "${SERVICE_FILE}"
     rm -f "${SCRIPT_INSTALL_PATH}"
     rm -f "${SCRIPT_ALIAS_PATH}"
     rm -f "${CONF_FILE}"
     rm -f "${LEGACY_CONF_FILE}"
+    rm -f "${PID_FILE}"
+    rm -f "${MANUAL_DISCHARGE_FLAG}"
 
     for b in "${LEGACY_BINARIES[@]}"; do
         rm -f "${b}" 2>/dev/null || true
     done
-
-    systemctl daemon-reload
-    log_info "systemd reloaded."
 
     echo
     echo "==============================================================="
@@ -963,11 +1619,13 @@ show_status() {
             echo "  Hardware Support: [INFO] Not supported on this machine"
         fi
         echo
-        echo "systemd Service (${SERVICE_NAME}):"
-        if [[ -f "${SERVICE_FILE}" ]]; then
+        local init_display
+        init_display=$(detect_init_display)
+        echo "Service (${init_display}):"
+        if is_init_service_installed; then
             echo "  Installed:        [YES]"
-            echo "  Enabled on boot:  $(systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null && echo '[YES]' || echo '[NO]')"
-            echo "  Active (running): $(systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null && echo '[YES]' || echo '[NO]')"
+            echo "  Enabled on boot:  $(is_init_service_enabled && echo '[YES]' || echo '[NO]')"
+            echo "  Active (running): $(is_init_service_active && echo '[YES]' || echo '[NO]')"
         else
             echo "  Installed:        [NO]"
         fi
@@ -1013,11 +1671,13 @@ show_status() {
             echo "  Suporte Hardware: [INFO] Nao suportado neste equipamento"
         fi
         echo
-        echo "Servico systemd (${SERVICE_NAME}):"
-        if [[ -f "${SERVICE_FILE}" ]]; then
+        local init_display
+        init_display=$(detect_init_display)
+        echo "Servico (${init_display}):"
+        if is_init_service_installed; then
             echo "  Instalado:        [SIM]"
-            echo "  Habilitado boot:  $(systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null && echo '[SIM]' || echo '[NAO]')"
-            echo "  Ativo (rodando):  $(systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null && echo '[SIM]' || echo '[NAO]')"
+            echo "  Habilitado boot:  $(is_init_service_enabled && echo '[SIM]' || echo '[NAO]')"
+            echo "  Ativo (rodando):  $(is_init_service_active && echo '[SIM]' || echo '[NAO]')"
         else
             echo "  Instalado:        [NAO]"
         fi
@@ -1034,8 +1694,8 @@ TUI_ROW=1
 TUI_COL=1
 readonly BOX_WIDTH=68
 readonly INNER_WIDTH=66
+readonly MAX_TEXT_WIDTH=63
 
-# Calculates exact terminal center safely without triggering set -e on arithmetic
 tui_calc_center() {
     local box_h="${1:-18}"
     local box_w="${2:-${BOX_WIDTH}}"
@@ -1055,32 +1715,46 @@ tui_calc_center() {
     if (( TUI_COL < 1 )); then TUI_COL=1; fi
 }
 
-# Draws a row with exact left/right borders anchored by ANSI column coordinates
 tui_draw_row() {
     local r="$1"
     local content="${2:-}"
     local right_col=$(( TUI_COL + BOX_WIDTH - 1 ))
+
+    # Truncate plain text lines (without ANSI escapes) so long DMI names never overflow box borders
+    if [[ "${content}" != *"\033"* ]] && (( ${#content} > MAX_TEXT_WIDTH )); then
+        content="${content:0:$(( MAX_TEXT_WIDTH - 3 ))}..."
+    fi
+
     printf '\033[%d;%dH│%*s│\033[%d;%dH%b\033[%d;%dH│' \
         "${r}" "${TUI_COL}" "${INNER_WIDTH}" "" \
         "${r}" "$(( TUI_COL + 2 ))" "${content}" \
         "${r}" "${right_col}" > /dev/tty
 }
 
-# Draws a selectable menu item with full-width inverse highlight bar
 tui_draw_item() {
     local r="$1"
     local selected_flag="$2"
     local text="$3"
     local right_col=$(( TUI_COL + BOX_WIDTH - 1 ))
-    if (( selected_flag == 1 )); then
-        printf '\033[%d;%dH│  \033[7;1m%-62s\033[0m  │' \
-            "${r}" "${TUI_COL}" " ${text}" > /dev/tty
-        printf '\033[%d;%dH│' "${r}" "${right_col}" > /dev/tty
-    else
-        printf '\033[%d;%dH│  %-62s  │' \
-            "${r}" "${TUI_COL}" " ${text}" > /dev/tty
-        printf '\033[%d;%dH│' "${r}" "${right_col}" > /dev/tty
+    local text_len=${#text}
+    local pad_len=$(( 61 - text_len ))
+    if (( pad_len < 0 )); then
+        text="${text:0:58}..."
+        pad_len=0
     fi
+    local pad=""
+    if (( pad_len > 0 )); then
+        printf -v pad '%*s' "${pad_len}" ""
+    fi
+
+    if (( selected_flag == 1 )); then
+        printf '\033[%d;%dH│  \033[7;1m %s%s\033[0m  │' \
+            "${r}" "${TUI_COL}" "${text}" "${pad}" > /dev/tty
+    else
+        printf '\033[%d;%dH│   %s%s  │' \
+            "${r}" "${TUI_COL}" "${text}" "${pad}" > /dev/tty
+    fi
+    printf '\033[%d;%dH│' "${r}" "${right_col}" > /dev/tty
 }
 
 tui_draw_top() {
@@ -1120,18 +1794,18 @@ read_tty_key() {
     fi
 
     if [[ "${k1}" == $'\x1b' ]]; then
-        if ! IFS= read -rsn1 -t 0.02 k2 < /dev/tty 2>/dev/null || [[ -z "${k2}" ]]; then
+        if ! IFS= read -rsn1 -t 0.05 k2 < /dev/tty 2>/dev/null || [[ -z "${k2}" ]]; then
             LAST_KEY="ESC"
             return 0
         fi
         if [[ "${k2}" == "[" || "${k2}" == "O" ]]; then
-            IFS= read -rsn1 -t 0.02 k3 < /dev/tty 2>/dev/null || true
+            IFS= read -rsn1 -t 0.05 k3 < /dev/tty 2>/dev/null || true
             case "${k3}" in
-                A) LAST_KEY="UP" ;;
-                B) LAST_KEY="DOWN" ;;
-                C) LAST_KEY="RIGHT" ;;
-                D) LAST_KEY="LEFT" ;;
-                *) LAST_KEY="OTHER_SEQ" ;;
+                (A) LAST_KEY="UP" ;;
+                (B) LAST_KEY="DOWN" ;;
+                (C) LAST_KEY="RIGHT" ;;
+                (D) LAST_KEY="LEFT" ;;
+                (*) LAST_KEY="OTHER_SEQ" ;;
             esac
             return 0
         fi
@@ -1140,10 +1814,6 @@ read_tty_key() {
     fi
 
     LAST_KEY="${k1}"
-}
-
-cleanup_tui() {
-    printf '\033[?25h\033[0m' > /dev/tty 2>/dev/null || true
 }
 
 tui_msgbox() {
@@ -1174,7 +1844,7 @@ tui_msgbox() {
     while true; do
         read_tty_key
         case "${LAST_KEY}" in
-            ENTER|ESC|" "|q|Q) break ;;
+            (ENTER|ESC|" "|q|Q) break ;;
         esac
     done
 }
@@ -1204,19 +1874,19 @@ tui_inputbox() {
 
         read_tty_key
         case "${LAST_KEY}" in
-            ESC)
+            (ESC)
                 return 1
                 ;;
-            ENTER)
+            (ENTER)
                 INPUT_RESULT="${buf}"
                 return 0
                 ;;
-            $'\x7f'|$'\x08')
+            ($'\x7f'|$'\x08')
                 if [[ -n "${buf}" ]]; then
                     buf="${buf%?}"
                 fi
                 ;;
-            [0-9])
+            ([0-9])
                 if (( ${#buf} < 3 )); then
                     buf+="${LAST_KEY}"
                 fi
@@ -1250,16 +1920,16 @@ tui_yesno() {
 
         read_tty_key
         case "${LAST_KEY}" in
-            LEFT|RIGHT|UP|DOWN|h|l|j|k|$'\t')
+            (LEFT|RIGHT|UP|DOWN|h|l|j|k|$'\t')
                 sel=$(( 1 - sel ))
                 ;;
-            y|Y|s|S)
+            (y|Y|s|S)
                 return 0
                 ;;
-            n|N|q|Q|ESC)
+            (n|N|q|Q|ESC)
                 return 1
                 ;;
-            ENTER)
+            (ENTER)
                 return ${sel}
                 ;;
         esac
@@ -1292,12 +1962,11 @@ tui_show_status_box() {
     while true; do
         read_tty_key
         case "${LAST_KEY}" in
-            ESC|q|Q)
+            (ESC|q|Q)
                 cleanup_tui
-                printf '\033[2J\033[H' > /dev/tty
                 exit 0
                 ;;
-            ENTER|" ")
+            (ENTER|" ")
                 break
                 ;;
         esac
@@ -1305,12 +1974,12 @@ tui_show_status_box() {
 }
 
 show_interactive_menu() {
-    # Verify if /dev/tty is accessible; otherwise fallback to status output
     if ! ( : > /dev/tty ) 2>/dev/null; then
         show_status
         exit 0
     fi
 
+    TUI_ACTIVE=1
     trap cleanup_tui EXIT INT TERM
     printf '\033[?25l' > /dev/tty
 
@@ -1375,51 +2044,49 @@ show_interactive_menu() {
         local action=""
 
         case "${LAST_KEY}" in
-            ESC|q|Q|0)
+            (ESC|q|Q|0)
                 cleanup_tui
-                printf '\033[2J\033[H' > /dev/tty
                 exit 0
                 ;;
-            UP|k|K)
+            (UP|k|K)
                 selected=$(( (selected - 1 + total_items) % total_items ))
                 continue
                 ;;
-            DOWN|j|J)
+            (DOWN|j|J)
                 selected=$(( (selected + 1) % total_items ))
                 continue
                 ;;
-            1) selected=0; action="1" ;;
-            2) selected=1; action="2" ;;
-            3) selected=2; action="3" ;;
-            4) selected=3; action="4" ;;
-            5) selected=4; action="5" ;;
-            6|l|L) selected=5; action="6" ;;
-            ENTER)
+            (1) selected=0; action="1" ;;
+            (2) selected=1; action="2" ;;
+            (3) selected=2; action="3" ;;
+            (4) selected=3; action="4" ;;
+            (5) selected=4; action="5" ;;
+            (6|l|L) selected=5; action="6" ;;
+            (ENTER)
                 case "${selected}" in
-                    0) action="1" ;;
-                    1) action="2" ;;
-                    2) action="3" ;;
-                    3) action="4" ;;
-                    4) action="5" ;;
-                    5) action="6" ;;
-                    6)
+                    (0) action="1" ;;
+                    (1) action="2" ;;
+                    (2) action="3" ;;
+                    (3) action="4" ;;
+                    (4) action="5" ;;
+                    (5) action="6" ;;
+                    (6)
                         cleanup_tui
-                        printf '\033[2J\033[H' > /dev/tty
                         exit 0
                         ;;
                 esac
                 ;;
-            *)
+            (*)
                 continue
                 ;;
         esac
 
         case "${action}" in
-            1)
+            (1)
                 tui_show_status_box
                 ;;
 
-            2)
+            (2)
                 check_root
                 if [[ "${AUTO_DISCHARGE:-true}" == "true" ]]; then
                     set_auto_discharge_cmd "off" >/dev/null
@@ -1432,7 +2099,7 @@ show_interactive_menu() {
                 fi
                 ;;
 
-            3)
+            (3)
                 check_root
                 local new_start="" new_end=""
                 if ! tui_inputbox "${L_IN_START_TITLE}" "${L_IN_START_PROMPT}" "${START_THRESHOLD}"; then
@@ -1446,7 +2113,7 @@ show_interactive_menu() {
                 new_end="${INPUT_RESULT}"
 
                 if apply_thresholds "${new_start}" "${new_end}" >/dev/null 2>&1; then
-                    save_config "${new_start}" "${new_end}" "${AUTO_DISCHARGE}" "${DELL_MODE}" "${UI_LANG}"
+                    save_config "${new_start}" "${new_end}" "${AUTO_DISCHARGE}" "custom" "${UI_LANG}"
                     if [[ "${UI_LANG}" == "en" ]]; then
                         tui_msgbox "${L_MSG_LIM_OK_TITLE}" "Thresholds updated: Start = ${new_start}% | Stop = ${new_end}%"
                     else
@@ -1461,7 +2128,7 @@ show_interactive_menu() {
                 fi
                 ;;
 
-            4)
+            (4)
                 check_root
                 if force_discharge_cmd >/dev/null 2>&1; then
                     tui_msgbox "${L_MSG_FD_OK_TITLE}" "${L_MSG_FD_OK_BODY}"
@@ -1470,15 +2137,15 @@ show_interactive_menu() {
                 fi
                 ;;
 
-            5)
+            (5)
                 check_root
                 if tui_yesno "${L_YN_RESTORE_TITLE}" "${L_YN_RESTORE_PROMPT}"; then
-                    restore_defaults >/dev/null 2>&1
+                    restore_defaults "true" >/dev/null 2>&1
                     tui_msgbox "${L_MSG_RESTORE_TITLE}" "${L_MSG_RESTORE_BODY}"
                 fi
                 ;;
 
-            6)
+            (6)
                 if [[ "${UI_LANG}" == "en" ]]; then
                     UI_LANG="pt"
                 else
@@ -1503,14 +2170,15 @@ run_test() {
 
     local passed=0
     local failed=0
+    local info_count=0
 
     echo -n "  [1/5] Battery detected............................ "
     if [[ -d "${BAT_PATH}" ]]; then
         echo "[PASS]"
-        ((passed += 1))
+        passed=$(( passed + 1 ))
     else
         echo "[FAIL]"
-        ((failed += 1))
+        failed=$(( failed + 1 ))
     fi
 
     echo -n "  [2/5] Vendor recognized........................... "
@@ -1518,43 +2186,55 @@ run_test() {
     v=$(detect_vendor)
     if [[ "${v}" != "generic" ]]; then
         echo "[PASS] ($(detect_vendor_display))"
-        ((passed += 1))
+        passed=$(( passed + 1 ))
     else
         echo "[INFO] ($(detect_vendor_display))"
+        info_count=$(( info_count + 1 ))
     fi
 
     echo -n "  [3/5] Threshold interface available............... "
-    if [[ -e "${END_THRESHOLD_FILE}" || -f "${WMI_MODE_FILE}" ]] || command -v smbios-battery-ctl >/dev/null 2>&1; then
+    if [[ -e "${END_THRESHOLD_FILE}" || -f "${WMI_MODE_FILE}" ]] || command -v smbios-battery-ctl >/dev/null 2>&1 || command -v cctk >/dev/null 2>&1; then
         echo "[PASS]"
-        ((passed += 1))
+        passed=$(( passed + 1 ))
     else
         echo "[FAIL]"
-        ((failed += 1))
+        failed=$(( failed + 1 ))
     fi
 
     echo -n "  [4/5] force-discharge support..................... "
     if is_force_discharge_supported; then
         echo "[PASS]"
-        ((passed += 1))
+        passed=$(( passed + 1 ))
     else
         echo "[INFO] (not supported)"
+        info_count=$(( info_count + 1 ))
     fi
 
-    echo -n "  [5/5] systemd service active...................... "
-    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+    local init_name
+    init_name=$(detect_init_display)
+    echo -n "  [5/5] ${init_name} service active"
+    local test_label="  [5/5] ${init_name} service active"
+    local pad_count=$(( 52 - ${#test_label} ))
+    if (( pad_count < 1 )); then pad_count=1; fi
+    printf '%*s ' "${pad_count}" '' | tr ' ' '.'
+    if is_init_service_active; then
         echo "[PASS]"
-        ((passed += 1))
+        passed=$(( passed + 1 ))
     else
         echo "[FAIL / INACTIVE]"
-        ((failed += 1))
+        failed=$(( failed + 1 ))
     fi
 
     echo
     echo "==============================================================="
-    echo "  Result: ${passed} passed, ${failed} failed"
+    if (( info_count > 0 )); then
+        echo "  Result: ${passed} passed, ${info_count} info, ${failed} failed"
+    else
+        echo "  Result: ${passed} passed, ${failed} failed"
+    fi
     echo "==============================================================="
 
-    return ${failed}
+    return $(( failed > 0 ? 1 : 0 ))
 }
 
 # ========================== SET THRESHOLDS (CLI) ============================
@@ -1566,7 +2246,7 @@ set_thresholds_cmd() {
     local end_val="$2"
 
     if apply_thresholds "${start_val}" "${end_val}"; then
-        save_config "${start_val}" "${end_val}" "${AUTO_DISCHARGE}" "${DELL_MODE}" "${UI_LANG}"
+        save_config "${start_val}" "${end_val}" "${AUTO_DISCHARGE}" "custom" "${UI_LANG}"
     else
         return 1
     fi
@@ -1576,10 +2256,13 @@ set_thresholds_cmd() {
 
 show_usage() {
     load_config
+    local init_name
+    init_name=$(detect_init_display)
     if [[ "${UI_LANG}" == "en" ]]; then
         cat << EOF
 ${SCRIPT_NAME} v${SCRIPT_VERSION}
 Universal Intelligent Battery Manager for Linux (Lenovo, ASUS, Dell)
+Supported Inits: systemd, OpenRC, Runit, dinit, SysVinit [Detected: ${init_name}]
 
 QUICK USAGE:
     sudo $(basename "$0")                  Open interactive TUI menu
@@ -1597,9 +2280,10 @@ OTHER COMMANDS:
     restore                Restore factory defaults (100%)
     check                  Verify hardware compatibility
     test                   Run 5-step system integrity tests
-    install                Install universal manager and enable systemd service
-    enable                 Re-enable systemd service
+    install                Install universal manager and enable system service
+    enable                 Re-enable system service (${init_name})
     disable                Temporarily disable service and restore 100%
+    stop                   Stop running service/daemon
     remove                 Completely uninstall script, config, and service
     help                   Show this help message
 EOF
@@ -1607,6 +2291,7 @@ EOF
         cat << EOF
 ${SCRIPT_NAME} v${SCRIPT_VERSION}
 Gerenciador Inteligente de Bateria Universal para Linux (Lenovo, ASUS, Dell)
+Inits Suportados: systemd, OpenRC, Runit, dinit, SysVinit [Detectado: ${init_name}]
 
 USO RAPIDO:
     sudo $(basename "$0")                  Abre o menu interativo TUI
@@ -1625,8 +2310,9 @@ OUTROS COMANDOS:
     check                  Verifica compatibilidade do hardware
     test                   Executa bateria de testes do sistema
     install                Instala o gerenciador universal e ativa o servico
-    enable                 Reabilita o servico no systemd
+    enable                 Reabilita o servico no sistema (${init_name})
     disable                Desabilita o servico temporariamente
+    stop                   Para o servico/daemon em execucao
     remove                 Desinstala completamente o script e servico
     help                   Exibe esta ajuda
 EOF
@@ -1640,31 +2326,37 @@ main() {
     local command="${1:-menu}"
 
     case "${command}" in
-        menu)
+        (menu)
             show_interactive_menu
             ;;
-        on)
+        (on)
             set_auto_discharge_cmd "on"
             ;;
-        off)
+        (off)
             set_auto_discharge_cmd "off"
             ;;
-        auto-discharge)
+        (auto-discharge)
             set_auto_discharge_cmd "${2:-status}"
             ;;
-        lang|language|idioma)
+        (lang|language|idioma)
             set_language_cmd "${2:-toggle}"
             ;;
-        check)
+        (check)
             check_hardware || true
             ;;
-        apply)
+        (apply)
             check_root
-            local end_arg="${2:-${END_THRESHOLD}}"
-            local start_arg="${3:-${START_THRESHOLD}}"
+            local start_arg="${START_THRESHOLD}"
+            local end_arg="${END_THRESHOLD}"
+            if [[ $# -eq 2 ]]; then
+                end_arg="$2"
+            elif [[ $# -ge 3 ]]; then
+                start_arg="$2"
+                end_arg="$3"
+            fi
             apply_thresholds "${start_arg}" "${end_arg}"
             ;;
-        set)
+        (set)
             if [[ $# -lt 3 ]]; then
                 log_error "Usage: sudo $(basename "$0") set <start> <end>"
                 log_error "Example: sudo $(basename "$0") set 75 80"
@@ -1672,44 +2364,48 @@ main() {
             fi
             set_thresholds_cmd "$2" "$3"
             ;;
-        daemon)
+        (daemon)
             run_daemon
             ;;
-        stop)
+        (stop)
+            check_root
+            stop_init_service
+            ;;
+        (post-stop)
             stop_daemon_action
             ;;
-        discharge)
+        (discharge)
             force_discharge_cmd
             ;;
-        stop-discharge)
+        (stop-discharge)
             stop_discharge_cmd
             ;;
-        restore)
+        (restore)
             check_root
-            restore_defaults
+            restore_defaults "true"
             ;;
-        status)
+        (status)
             show_status
             ;;
-        test)
+        (test)
             run_test || true
             ;;
-        install)
+        (install)
             install_service
             ;;
-        enable)
+        (enable)
             enable_service
             ;;
-        disable)
+        (disable)
             disable_service
             ;;
-        remove)
+        (remove)
             remove_service
             ;;
-        help|--help|-h)
+        (help|--help|-h)
             show_usage
             ;;
-        *)
+        (*)
             log_error "Unknown command: ${command}"
             show_usage
             exit 1
@@ -1718,3 +2414,4 @@ main() {
 }
 
 main "$@"
+
