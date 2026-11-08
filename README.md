@@ -103,10 +103,10 @@ The script inspects `/sys/class/dmi/id/sys_vendor` and automatically selects the
 Clone the repository and run the installer as `root`:
 
 ```bash
-git clone https://github.com/AlanSchaffer/gerenciador-bateria.git
-cd gerenciador-bateria
-chmod +x gerenciador-bateria.sh
-sudo ./gerenciador-bateria.sh install
+git clone https://github.com/AlanSchaffer/linux-battery-manager.git
+cd linux-battery-manager
+chmod +x linux-battery-manager.sh
+sudo ./linux-battery-manager.sh install
 ```
 
 **What the installer does:**
@@ -224,10 +224,10 @@ O script lê `/sys/class/dmi/id/sys_vendor` e seleciona automaticamente o melhor
 Clone o repositório e execute o instalador com `sudo`:
 
 ```bash
-git clone https://github.com/AlanSchaffer/gerenciador-bateria.git
-cd gerenciador-bateria
-chmod +x gerenciador-bateria.sh
-sudo ./gerenciador-bateria.sh install
+git clone https://github.com/AlanSchaffer/linux-battery-manager.git
+cd linux-battery-manager
+chmod +x linux-battery-manager.sh
+sudo ./linux-battery-manager.sh install
 ```
 
 **O que o instalador faz:**
