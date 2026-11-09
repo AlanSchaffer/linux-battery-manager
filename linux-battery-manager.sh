@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ============================================================================
-# linux-battery-manager (v2.3.1 Universal Multi-Init)
+# linux-battery-manager (v2.3.2 Universal Multi-Init)
 # Universal Intelligent Battery Charge Limit & Auto-Discharge Manager for Linux
 # Natively compatible with Lenovo (ThinkPad), ASUS, and Dell / Alienware
 # Multi-Init Support: systemd, OpenRC, Runit, dinit, SysVinit
@@ -24,7 +24,7 @@ set -euo pipefail
 
 # ========================== GENERAL CONFIGURATION ===========================
 readonly SCRIPT_NAME="linux-battery-manager"
-readonly SCRIPT_VERSION="2.3.1"
+readonly SCRIPT_VERSION="2.3.2"
 
 # Default threshold values (%)
 DEFAULT_START_THRESHOLD=75
@@ -215,10 +215,10 @@ setup_strings() {
         L_MSG_AD_OFF_BODY="Smart Auto-Discharge on AC power has been DISABLED."
         L_MSG_AD_ON_TITLE="Auto-Discharge Enabled"
         L_MSG_AD_ON_BODY=$(printf "Smart Auto-Discharge has been ENABLED!\nIf booted at 100%% on AC, it drains down to %s%%." "${START_THRESHOLD}")
-        L_IN_START_TITLE="Start Threshold"
-        L_IN_START_PROMPT="Enter % to START charging (e.g. 75):"
-        L_IN_END_TITLE="Stop Threshold"
-        L_IN_END_PROMPT="Enter % to STOP charging (e.g. 80):"
+        L_IN_START_TITLE="Start Threshold (Resume)"
+        L_IN_START_PROMPT="Enter % to START charging (e.g. 78):"
+        L_IN_END_TITLE="Stop Threshold (Limit)"
+        L_IN_END_PROMPT="Enter % to STOP charging (e.g. 80, 90):"
         L_MSG_LIM_OK_TITLE="Success"
         L_MSG_LIM_ERR_TITLE="Validation Error"
         L_MSG_FD_OK_TITLE="Immediate Discharge"
@@ -261,10 +261,10 @@ setup_strings() {
         L_MSG_AD_OFF_BODY="A Descarga Inteligente na tomada foi DESATIVADA."
         L_MSG_AD_ON_TITLE="Auto-Discharge Ativado"
         L_MSG_AD_ON_BODY=$(printf "A Descarga Inteligente foi ATIVADA!\nSe ligar em 100%%, drenara na tomada ate %s%%." "${START_THRESHOLD}")
-        L_IN_START_TITLE="Limite de Inicio"
-        L_IN_START_PROMPT="Digite a % para INICIAR a recarga (ex: 75):"
-        L_IN_END_TITLE="Limite de Parada"
-        L_IN_END_PROMPT="Digite a % para PARAR a recarga (ex: 80):"
+        L_IN_START_TITLE="Limite Inicial de Carga"
+        L_IN_START_PROMPT="Digite a % para INICIAR a recarga (ex: 78):"
+        L_IN_END_TITLE="Limite Maximo de Carga"
+        L_IN_END_PROMPT="Digite a % para PARAR a recarga (ex: 80, 90):"
         L_MSG_LIM_OK_TITLE="Sucesso"
         L_MSG_LIM_ERR_TITLE="Erro de Validacao"
         L_MSG_FD_OK_TITLE="Descarga Imediata"
@@ -419,6 +419,87 @@ write_sysfs_thresholds() {
     return 1
 }
 
+# Calculate safe default start threshold for single-limit inputs
+calculate_default_start() {
+    local end_val="$1"
+    local vendor
+    vendor=$(detect_vendor)
+
+    if ! [[ "${end_val}" =~ ^[0-9]+$ ]]; then
+        echo "0"
+        return
+    fi
+
+    case "${vendor}" in
+        (asus)
+            echo "0"
+            ;;
+        (dell)
+            local s=$(( end_val - 5 ))
+            if (( s < 50 )); then s=50; fi
+            if (( s >= end_val )); then s=$(( end_val - 1 )); fi
+            echo "${s}"
+            ;;
+        (*)
+            local s=$(( end_val - 2 ))
+            if (( s < 1 )); then s=1; fi
+            echo "${s}"
+            ;;
+    esac
+}
+
+# Kickstart charging if battery is below target end threshold on AC but held in hysteresis idle
+kickstart_charging() {
+    local target_start="${1:-${START_THRESHOLD}}"
+    local target_end="${2:-${END_THRESHOLD}}"
+
+    if ! is_ac_online; then
+        return 0
+    fi
+
+    if [[ ! -e "${START_THRESHOLD_FILE}" || ! -e "${END_THRESHOLD_FILE}" ]]; then
+        return 0
+    fi
+
+    # Factory default restore does not need kickstart
+    if (( target_start == 0 && target_end == 100 )); then
+        return 0
+    fi
+
+    local cur_cap cur_status cur_start
+    cur_cap=$(cat "${BAT_PATH}/capacity" 2>/dev/null || echo "")
+    cur_status=$(cat "${BAT_PATH}/status" 2>/dev/null || echo "")
+    cur_start=$(cat "${START_THRESHOLD_FILE}" 2>/dev/null || echo "0")
+
+    [[ "${cur_cap}" =~ ^[0-9]+$ ]] || return 0
+    [[ "${cur_start}" =~ ^[0-9]+$ ]] || cur_start="0"
+    [[ "${target_end}" =~ ^[0-9]+$ ]] || target_end="100"
+
+    # Only kickstart if plugged in, below end threshold, and sitting idle due to hysteresis (cap >= start)
+    if (( cur_cap < target_end && cur_cap >= cur_start )) && \
+       [[ "${cur_status}" == "Not charging" || "${cur_status}" == "Unknown" || "${cur_status}" == "Idle" ]]; then
+        local temp_start=$(( target_end > 1 ? target_end - 1 : 1 ))
+        log_info "Battery below limit (${cur_cap}% < ${target_end}%) in hysteresis hold. Kickstarting charge..."
+
+        # Temporarily raise start threshold to trigger EC hardware charging circuit
+        echo "${temp_start}" > "${START_THRESHOLD_FILE}" 2>/dev/null || true
+
+        local i
+        for (( i=0; i<3; i++ )); do
+            sleep 1
+            cur_status=$(cat "${BAT_PATH}/status" 2>/dev/null || echo "")
+            if [[ "${cur_status}" == "Charging" ]]; then
+                log_info "Charge kickstart confirmed: battery is now Charging."
+                break
+            fi
+        done
+
+        # Restore configured start threshold. Once initiated, EC hardware continues charging until target_end
+        echo "${target_start}" > "${START_THRESHOLD_FILE}" 2>/dev/null || true
+        log_info "Start threshold restored to ${target_start}% (charging continues up to ${target_end}%)."
+    fi
+}
+
 # ========================== HARDWARE CHECK ==================================
 
 check_hardware() {
@@ -528,6 +609,7 @@ apply_thresholds() {
                 return 1
             fi
             log_info "[OK] ThinkPad limits applied: Start=${start_val}% | Stop=${end_val}%"
+            kickstart_charging "${start_val}" "${end_val}"
             ;;
 
         (asus)
@@ -625,6 +707,7 @@ apply_thresholds() {
                 return 1
             fi
             log_info "[OK] Generic limits applied: ${start_val}% - ${end_val}%"
+            kickstart_charging "${start_val}" "${end_val}"
             ;;
     esac
 
@@ -673,6 +756,7 @@ run_daemon() {
 
     local discharge_in_progress=0
     local sleep_pid=""
+    local last_kickstart_cap=""
 
     echo $$ > "${PID_FILE}" 2>/dev/null || true
 
@@ -691,6 +775,7 @@ run_daemon() {
 
     reload_daemon() {
         discharge_in_progress=0
+        last_kickstart_cap=""
         if [[ -n "${sleep_pid}" ]]; then
             kill -TERM "${sleep_pid}" 2>/dev/null || true
         fi
@@ -701,6 +786,7 @@ run_daemon() {
     apply_thresholds "${START_THRESHOLD}" "${END_THRESHOLD}" || true
 
     local cur_cap=""
+    local cur_status=""
     local cur_sys_end=""
     local current_behaviour=""
 
@@ -708,6 +794,7 @@ run_daemon() {
         load_config
 
         cur_cap=$(cat "${BAT_PATH}/capacity" 2>/dev/null || echo "")
+        cur_status=$(cat "${BAT_PATH}/status" 2>/dev/null || echo "")
 
         if [[ -n "${cur_cap}" && "${cur_cap}" =~ ^[0-9]+$ ]]; then
             if [[ -e "${END_THRESHOLD_FILE}" ]]; then
@@ -720,6 +807,33 @@ run_daemon() {
 
             if is_force_discharge_supported; then
                 current_behaviour=$(get_charge_behaviour)
+            else
+                current_behaviour="auto"
+            fi
+
+            if is_ac_online; then
+                if [[ -n "${last_kickstart_cap}" && "${last_kickstart_cap}" != "${cur_cap}" ]]; then
+                    last_kickstart_cap=""
+                fi
+
+                # Kickstart charging if held in hysteresis idle on AC below target end threshold
+                if [[ ${discharge_in_progress} -eq 0 && ! -f "${MANUAL_DISCHARGE_FLAG}" ]] && \
+                   [[ "${current_behaviour}" != "force-discharge" ]] && \
+                   [[ "${cur_status}" == "Not charging" || "${cur_status}" == "Unknown" || "${cur_status}" == "Idle" ]] && \
+                   (( cur_cap < END_THRESHOLD )); then
+                    local cur_sys_start
+                    cur_sys_start=$(cat "${START_THRESHOLD_FILE}" 2>/dev/null || echo "0")
+                    [[ "${cur_sys_start}" =~ ^[0-9]+$ ]] || cur_sys_start="0"
+                    if (( cur_cap >= cur_sys_start )) && [[ "${last_kickstart_cap}" != "${cur_cap}" ]]; then
+                        kickstart_charging "${START_THRESHOLD}" "${END_THRESHOLD}"
+                        last_kickstart_cap="${cur_cap}"
+                    fi
+                fi
+            else
+                last_kickstart_cap=""
+            fi
+
+            if is_force_discharge_supported; then
 
                 # Safety guard: never allow force-discharge below 20%
                 if (( cur_cap <= 20 )) && [[ "${current_behaviour}" == "force-discharge" ]]; then
@@ -2102,15 +2216,31 @@ show_interactive_menu() {
             (3)
                 check_root
                 local new_start="" new_end=""
-                if ! tui_inputbox "${L_IN_START_TITLE}" "${L_IN_START_PROMPT}" "${START_THRESHOLD}"; then
-                    continue
-                fi
-                new_start="${INPUT_RESULT}"
+                local v
+                v=$(detect_vendor)
 
                 if ! tui_inputbox "${L_IN_END_TITLE}" "${L_IN_END_PROMPT}" "${END_THRESHOLD}"; then
                     continue
                 fi
                 new_end="${INPUT_RESULT}"
+
+                if [[ "${v}" == "asus" ]]; then
+                    new_start="0"
+                else
+                    local rec_start
+                    rec_start=$(calculate_default_start "${new_end}")
+                    local prompt_start
+                    if [[ "${UI_LANG}" == "pt" ]]; then
+                        prompt_start="Informe a % para INICIAR recarga (Recomendado: ${rec_start}):"
+                    else
+                        prompt_start="Enter % to START charging (Recommended: ${rec_start}):"
+                    fi
+
+                    if ! tui_inputbox "${L_IN_START_TITLE}" "${prompt_start}" "${rec_start}"; then
+                        continue
+                    fi
+                    new_start="${INPUT_RESULT}"
+                fi
 
                 if apply_thresholds "${new_start}" "${new_end}" >/dev/null 2>&1; then
                     save_config "${new_start}" "${new_end}" "${AUTO_DISCHARGE}" "custom" "${UI_LANG}"
@@ -2269,7 +2399,7 @@ QUICK USAGE:
     sudo $(basename "$0") on               Enable Smart Auto-Discharge
     sudo $(basename "$0") off              Disable Smart Auto-Discharge
     sudo $(basename "$0") status           Show detailed battery status
-    sudo $(basename "$0") set <start> <end>Set charge limits (e.g. set 75 80)
+    sudo $(basename "$0") set <limit> [or: <start> <end>] Set charge limits (e.g. set 80 or set 75 80)
     sudo $(basename "$0") lang <pt|en>     Change interface language
 
 OTHER COMMANDS:
@@ -2298,7 +2428,7 @@ USO RAPIDO:
     sudo $(basename "$0") on               Ativa a Descarga Inteligente
     sudo $(basename "$0") off              Desativa a Descarga Inteligente
     sudo $(basename "$0") status           Exibe status detalhado
-    sudo $(basename "$0") set <ini> <fim>  Ajusta limites (ex: set 75 80)
+    sudo $(basename "$0") set <limite> [ou: <ini> <fim>]  Ajusta limites (ex: set 80 ou set 75 80)
     sudo $(basename "$0") lang <pt|en>     Altera o idioma da interface
 
 OUTROS COMANDOS:
@@ -2350,6 +2480,7 @@ main() {
             local end_arg="${END_THRESHOLD}"
             if [[ $# -eq 2 ]]; then
                 end_arg="$2"
+                start_arg=$(calculate_default_start "${end_arg}")
             elif [[ $# -ge 3 ]]; then
                 start_arg="$2"
                 end_arg="$3"
@@ -2357,12 +2488,19 @@ main() {
             apply_thresholds "${start_arg}" "${end_arg}"
             ;;
         (set)
-            if [[ $# -lt 3 ]]; then
-                log_error "Usage: sudo $(basename "$0") set <start> <end>"
-                log_error "Example: sudo $(basename "$0") set 75 80"
+            if [[ $# -lt 2 ]]; then
+                log_error "Usage: sudo $(basename "$0") set <limit> [or: set <start> <end>]"
+                log_error "Example: sudo $(basename "$0") set 80   (or: set 75 80)"
                 exit 1
             fi
-            set_thresholds_cmd "$2" "$3"
+            if [[ $# -eq 2 ]]; then
+                local target_end="$2"
+                local target_start
+                target_start=$(calculate_default_start "${target_end}")
+                set_thresholds_cmd "${target_start}" "${target_end}"
+            else
+                set_thresholds_cmd "$2" "$3"
+            fi
             ;;
         (daemon)
             run_daemon
