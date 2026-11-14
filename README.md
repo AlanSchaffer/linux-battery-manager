@@ -266,6 +266,12 @@ sudo ./linux-battery-manager.sh install
 | `/etc/linux-battery-manager.conf` | Arquivo de configuração persistente |
 | `/etc/systemd/system/linux-battery-manager.service` | Unidade de serviço do `systemd` |
 
+
+## 📄 License
+
+    This project is licensed under the [MIT License](https://opensource.org/licenses/MIT). Feel free to use, study, modify, and
+    distribute it.
+
 ---
 
 ## 📄 Why this/Por que?
